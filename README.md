@@ -2,7 +2,7 @@
 
 A composite GitHub Action that builds and runs
 [pkgproxy](https://gitlab.com/zygoon/pkgproxy) as a caching proxy for apt,
-snap store, Go module, and LXD image traffic on a GitHub Actions runner.
+snap store, Go module, Docker Hub image, and LXD image traffic on a GitHub Actions runner.
 
 ## What it does
 
@@ -91,6 +91,18 @@ Not needed if `configure-host` is left at its default `true`.
 Points `GOPROXY` at pkgproxy for the invoking user (`go env -w`, a per-user
 config file — no `sudo` needed).
 
+### docker
+
+```yaml
+- run: pkgproxyctl setup docker -addr "${{ steps.pkgproxy.outputs.addr }}" | sudo sh
+```
+
+Adds pkgproxy as a Docker Hub registry mirror in the Docker daemon's
+`daemon.json` and **restarts the Docker daemon**, which is why it is not part
+of `configure-host`. Only anonymous pulls of public images are cached; the
+mirror is served on the same `addr` as apt/snap/go. Needs `jq` if a
+`daemon.json` already exists.
+
 ### lxd — containers as pkgproxy clients
 
 Routes apt/snap/go traffic from *inside* LXD containers through pkgproxy —
@@ -172,14 +184,14 @@ run in either order, as long as both finish before `snapcraft pack` runs.
 
 ## Inputs
 
-| Input               | Default            | Description                                                                 |
-| -------------------- | ------------------ | ----------------------------------------------------------------------------- |
-| `version`            | `v0.6.0`            | pkgproxy version to build (Go module version string, pinned not `@main`).     |
-| `go-version`          | `1.27.1`            | Go toolchain used to build pkgproxy on a binary-cache miss.                   |
-| `addr`                | `:3142`             | Address pkgproxy listens on.                                                  |
-| `binary-cache-key`     | `pkgproxy-bin`      | `actions/cache` key prefix for the built binary.                              |
-| `package-cache-key`    | `pkgproxy-cache-v2` | `actions/cache` key prefix for the payload cache.                             |
-| `configure-host`       | `true`              | Whether to point the host's apt/snapd at the proxy.                           |
+| Input               | Default             | Description                                                               |
+| ------------------- | ------------------- | ------------------------------------------------------------------------- |
+| `version`           | `v0.8.0`            | pkgproxy version to build (Go module version string, pinned not `@main`). |
+| `go-version`        | `1.27.1`            | Go toolchain used to build pkgproxy on a binary-cache miss.               |
+| `addr`              | `:3142`             | Address pkgproxy listens on.                                              |
+| `binary-cache-key`  | `pkgproxy-bin`      | `actions/cache` key prefix for the built binary.                          |
+| `package-cache-key` | `pkgproxy-cache-v3` | `actions/cache` key prefix for the payload cache.                         |
+| `configure-host`    | `true`              | Whether to point the host's apt/snapd at the proxy.                       |
 
 Bumping the pinned pkgproxy `version` is a one-file change here (this
 action's `version` default) — callers that don't pass `version:` explicitly
@@ -187,13 +199,13 @@ pick it up automatically on their next `@v1` resolution.
 
 ## Outputs
 
-| Output                       | Description                                                                 |
-| ------------------------------ | ----------------------------------------------------------------------------- |
-| `addr`                          | The resolved listen address (echoes the `addr` input).                       |
-| `cache-dir`                      | The payload cache directory (`/var/cache/pkgproxy`) — save this at job end.  |
-| `package-cache-hit`               | `'true'` when the stable success key restored exactly.                       |
-| `package-cache-key-success`        | Stable per-arch key to save under on success.                                |
-| `package-cache-key-partial`         | Stable per-arch key to save under when the job fails.                        |
+| Output                      | Description                                                                 |
+| --------------------------- | --------------------------------------------------------------------------- |
+| `addr`                      | The resolved listen address (echoes the `addr` input).                      |
+| `cache-dir`                 | The payload cache directory (`/var/cache/pkgproxy`) — save this at job end. |
+| `package-cache-hit`         | `'true'` when the stable success key restored exactly.                      |
+| `package-cache-key-success` | Stable per-arch key to save under on success.                               |
+| `package-cache-key-partial` | Stable per-arch key to save under when the job fails.                       |
 
 ## Versioning
 
