@@ -3,14 +3,14 @@
 #
 # Exercise the action, and the LXD/snapcraft setup the README documents, on
 # GitHub-hosted runners. A full run builds a snap on three runners, so it
-# runs only for merges to main and for release tags (v1.2.3 and the floating
-# v1), where drift in the runner images (LXD preinstalled or not, the runner
+# runs only for merges to main and to release branches (releases/v1), for
+# release tags (v1.2.3 and the floating v1), where drift in the runner images (LXD preinstalled or not, the runner
 # user's groups, LXD's version) matters, for pull requests that change this
 # workflow or what it tests, and by hand from the Actions tab.
 name: CI
 on:
   push:
-    branches: [main]
+    branches: [main, "releases/**"]
     tags: ["v*"]
   pull_request:
     paths:

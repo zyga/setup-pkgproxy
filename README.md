@@ -261,3 +261,8 @@ pick it up automatically on their next `@v1` resolution.
 Releases are tagged `vX.Y.Z`, with a floating `vX` tag moved to the latest
 release in that major version — pin to `zyga/setup-pkgproxy@v1` and get
 compatible updates (including pkgproxy version bumps) automatically.
+
+Each major version is maintained on its own long-lived branch,
+`releases/vX`, from which its `vX.Y.Z` tags are cut. `main` is where the
+next major version is developed: fixes and pkgproxy bumps for an existing
+major version go to its `releases/vX` branch.
