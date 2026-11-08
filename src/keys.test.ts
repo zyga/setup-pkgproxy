@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { binaryCacheKey, packageCacheKeys } from "./keys.ts";
 
 test("binary key includes version, Go and arch", () => {
-  assert.equal(binaryCacheKey("pkgproxy-bin", "v0.11.0", "1.27.1", "X64"), "pkgproxy-bin-v0.11.0-go1.27.1-X64");
+  assert.equal(binaryCacheKey("pkgproxy-bin", "v0.12.0", "1.27.1", "X64"), "pkgproxy-bin-v0.12.0-go1.27.1-X64");
 });
 
 test("package keys: unique save key under the restore prefix", () => {

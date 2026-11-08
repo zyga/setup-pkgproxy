@@ -14,7 +14,7 @@ inputs:
       callers normally omit this entirely; bumping the pin is a one-file
       change here (this default), not an edit in every caller.
     required: false
-    default: v0.11.0
+    default: v0.12.0
   go-version:
     description: >-
       Go toolchain used to build pkgproxy when the binary cache misses: taken
