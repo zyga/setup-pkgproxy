@@ -6,8 +6,7 @@
 // A failed job's cache is a valid, smaller cache, so it is saved too.
 
 import { readFile } from "node:fs/promises";
-import * as cache from "@actions/cache";
-import * as core from "@actions/core";
+import { cache, core } from "#vendor";
 
 import { CACHE_DIR, stats, stopAndReleaseCache } from "./daemon.ts";
 import { changed, diff, snapshot, type Manifest } from "./manifest.ts";

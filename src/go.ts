@@ -9,8 +9,7 @@
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { join } from "node:path";
-import * as core from "@actions/core";
-import * as tc from "@actions/tool-cache";
+import { core, tc } from "#vendor";
 
 const GO_DL = "https://go.dev/dl/";
 

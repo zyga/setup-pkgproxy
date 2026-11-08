@@ -5,8 +5,7 @@
 
 import { stat } from "node:fs/promises";
 import { setTimeout as sleep } from "node:timers/promises";
-import * as core from "@actions/core";
-import * as exec from "@actions/exec";
+import { core, exec } from "#vendor";
 
 // Embedded by esbuild (--loader:.service=text), so the bundle needs no
 // file next to it at runtime.

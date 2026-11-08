@@ -8,9 +8,7 @@
 import { randomBytes } from "node:crypto";
 import { access, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import * as cache from "@actions/cache";
-import * as core from "@actions/core";
-import * as exec from "@actions/exec";
+import { cache, core, exec } from "#vendor";
 
 import { CACHE_DIR, configureHost, start, sudo } from "./daemon.ts";
 import { ensureGo } from "./go.ts";
