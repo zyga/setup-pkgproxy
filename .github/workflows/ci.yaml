@@ -11,7 +11,9 @@ name: CI
 on:
   push:
     branches: [main, "releases/**"]
-    tags: ["v*"]
+    # Version tags only: a floating v1/v2 tag points at a commit its
+    # version tag already ran for.
+    tags: ["v*.*.*"]
   pull_request:
     paths:
       - .github/workflows/ci.yaml
