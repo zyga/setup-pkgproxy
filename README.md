@@ -311,7 +311,7 @@ run in either order, as long as both finish before `snapcraft pack` runs.
 
 | Input                | Default             | Description                                                               |
 | -------------------- | ------------------- | ------------------------------------------------------------------------- |
-| `version`            | `v0.11.0`           | pkgproxy version to build (Go module version string, pinned not `@main`). |
+| `version`            | `v0.12.0`           | pkgproxy version to build (Go module version string, pinned not `@main`). |
 | `go-version`         | `1.27.1`            | Go toolchain used to build pkgproxy on a binary-cache miss.               |
 | `addr`               | `:3142`             | Address pkgproxy listens on.                                              |
 | `binary-cache-key`   | `pkgproxy-bin`      | `actions/cache` key prefix for the built binary.                          |
