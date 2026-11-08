@@ -32,10 +32,9 @@ the payload cache at the end of the job.
 
 # ... later, after the job's real work:
 
-# pkgproxy.service runs as root, so everything under cache-dir is root-owned
-# while the daemon is up. Stop it and hand the directory back to the runner
-# user first, or actions/cache/save (which runs unprivileged) can fail to
-# read it.
+# Stopping pkgproxy makes its unit write the archive of the cache that
+# cache-dir holds (see "How the package cache is saved" below), owned by
+# root: hand it to the runner user, as actions/cache/save runs unprivileged.
 - name: Prepare pkgproxy cache for saving
   if: always()
   shell: bash
@@ -57,6 +56,23 @@ If the job can fail after the cache is warmed but before it would normally
 be saved, save under `package-cache-key-partial` instead in an `if: failure()`
 step, so the next run's `restore-keys` fallback still picks up that partial
 progress.
+
+### How the package cache is saved
+
+`cache-dir` is `/var/cache/pkgproxy-archive`, which holds an archive of
+pkgproxy's cache, `cache.tar`, not the cache itself, which is in
+`/var/cache/pkgproxy`. pkgproxy 0.12 keeps what it knows of each cached file
+in an extended attribute of the file (`user.pkgproxy.meta`), and the `tar`
+that `actions/cache` runs drops extended attributes; a file that lost its
+attribute is downloaded again, so the cache would never help. So when
+pkgproxy stops, its systemd unit writes the archive with `tar --xattrs`, and
+the action unpacks a restored archive the same way. The steps above save
+the archive with no change on your side, as long as they stop pkgproxy
+first: without the stop there is no archive to save.
+
+v1.2 moved to the archive, and with it the default `package-cache-key` from
+`pkgproxy-cache-v3` to `pkgproxy-cache-v4`: the first run after the upgrade
+starts cold on each CPU arch.
 
 ## Setting up each proxy client
 
@@ -239,7 +255,7 @@ run in either order, as long as both finish before `snapcraft pack` runs.
 | `go-version`        | `1.27.1`            | Go toolchain used to build pkgproxy on a binary-cache miss.               |
 | `addr`              | `:3142`             | Address pkgproxy listens on.                                              |
 | `binary-cache-key`  | `pkgproxy-bin`      | `actions/cache` key prefix for the built binary.                          |
-| `package-cache-key` | `pkgproxy-cache-v3` | `actions/cache` key prefix for the payload cache.                         |
+| `package-cache-key` | `pkgproxy-cache-v4` | `actions/cache` key prefix for the payload cache.                         |
 | `configure-host`    | `true`              | Whether to point the host's apt/snapd at the proxy.                       |
 
 Bumping the pinned pkgproxy `version` is a one-file change here (this
@@ -248,13 +264,13 @@ pick it up automatically on their next `@v1` resolution.
 
 ## Outputs
 
-| Output                      | Description                                                                 |
-| --------------------------- | --------------------------------------------------------------------------- |
-| `addr`                      | The resolved listen address (echoes the `addr` input).                      |
-| `cache-dir`                 | The payload cache directory (`/var/cache/pkgproxy`) — save this at job end. |
-| `package-cache-hit`         | `'true'` when the stable success key restored exactly.                      |
-| `package-cache-key-success` | Stable per-arch key to save under on success.                               |
-| `package-cache-key-partial` | Stable per-arch key to save under when the job fails.                       |
+| Output                      | Description                                                                                       |
+| --------------------------- | ------------------------------------------------------------------------------------------------- |
+| `addr`                      | The resolved listen address (echoes the `addr` input).                                            |
+| `cache-dir`                 | What to save at job end, after stopping pkgproxy: the directory holding the archive of the cache. |
+| `package-cache-hit`         | `'true'` when the stable success key restored exactly.                                            |
+| `package-cache-key-success` | Stable per-arch key to save under on success.                                                     |
+| `package-cache-key-partial` | Stable per-arch key to save under when the job fails.                                             |
 
 ## Versioning
 

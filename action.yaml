@@ -33,14 +33,17 @@ inputs:
     default: pkgproxy-bin
   package-cache-key:
     description: >-
-      actions/cache key prefix for the pkgproxy payload cache
-      (/var/cache/pkgproxy). Uses stable per-arch keys (no per-run id): the
+      actions/cache key prefix for the pkgproxy payload cache: an archive of
+      /var/cache/pkgproxy that keeps extended attributes (see the cache-dir
+      output). v1.2 moved to it from the plain directory v1.0 and v1.1
+      saved, and with it from pkgproxy-cache-v3 to pkgproxy-cache-v4.
+      Uses stable per-arch keys (no per-run id): the
       restore uses <prefix>-<arch>-success with -success-/-partial- prefix
       restore-keys, and the caller saves under the same key only when it wasn't
       an exact hit (overwrite-resistant — GitHub caches are immutable, so a
       per-run key would just write a fresh cache every run and churn storage).
     required: false
-    default: pkgproxy-cache-v3
+    default: pkgproxy-cache-v4
   configure-host:
     description: >-
       Whether to point the host's apt and snapd at the proxy (pkgproxyctl setup
@@ -55,8 +58,12 @@ outputs:
       place (this action's input default), not repeated as a literal.
     value: ${{ inputs.addr }}
   cache-dir:
-    description: The pkgproxy payload cache directory (save this at job end).
-    value: /var/cache/pkgproxy
+    description: >-
+      What to save with actions/cache/save at job end, after stopping
+      pkgproxy: the directory holding the archive of pkgproxy's cache, which
+      the unit writes, extended attributes included, when pkgproxy stops.
+      pkgproxy's cache itself is in /var/cache/pkgproxy.
+    value: /var/cache/pkgproxy-archive
   package-cache-hit:
     description: >-
       'true' when the stable success key restored exactly. When true, the caller
@@ -122,18 +129,34 @@ runs:
         # start.sh) recursively chowns it to root, so no manual chown is needed
         # here beyond making it restorable. /run/pkgproxy needs no pre-creation:
         # the unit's RuntimeDirectory= creates it (and removes it on stop).
-        sudo mkdir -p /var/cache/pkgproxy
-        sudo chown -R "$USER:$USER" /var/cache/pkgproxy
+        # The archive directory is what actions/cache restores and saves (see
+        # pkgproxy.service's ExecStopPost=).
+        sudo mkdir -p /var/cache/pkgproxy /var/cache/pkgproxy-archive
+        sudo chown -R "$USER:$USER" /var/cache/pkgproxy /var/cache/pkgproxy-archive
 
     - name: Restore pkgproxy package cache
       id: package-cache
       uses: actions/cache/restore@v6
       with:
-        path: /var/cache/pkgproxy
+        path: /var/cache/pkgproxy-archive
         key: ${{ steps.keys.outputs.package-cache-key-success }}
         restore-keys: |
           ${{ inputs.package-cache-key }}-${{ runner.arch }}-success
           ${{ inputs.package-cache-key }}-${{ runner.arch }}-partial
+
+    # pkgproxy 0.12 keeps each cached file's metadata in an extended
+    # attribute, which the tar actions/cache runs drops: the cache is saved
+    # as an archive made with tar --xattrs, which the unit writes when
+    # pkgproxy stops, and unpacked the same way here. The archive is removed
+    # once unpacked: it is several hundred MB, and the unit writes a new one.
+    - name: Unpack pkgproxy package cache
+      shell: bash
+      run: |
+        archive=/var/cache/pkgproxy-archive/cache.tar
+        if [ -f "$archive" ]; then
+          tar --xattrs --xattrs-include='user.*' -xf "$archive" -C /var/cache/pkgproxy
+          rm -f "$archive"
+        fi
 
     - name: Start pkgproxy daemon and configure host
       shell: bash
