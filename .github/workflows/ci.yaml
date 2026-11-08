@@ -226,8 +226,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RUN: -${{ github.run_id }}-${{ github.run_attempt }}-
+        # Not filtered by ref: GitHub files the caches of a tag run under
+        # refs/heads/refs/tags/<tag>, not GITHUB_REF (refs/tags/<tag>). The
+        # run id in the keys picks out this run's caches on any ref, and they
+        # are the newest.
         run: |
-          gh cache list --ref "$GITHUB_REF" --key pkgproxy-cache-v4- --limit 100 --json key,sizeInBytes \
+          gh cache list --key pkgproxy-cache-v4- --sort created_at --order desc --limit 100 --json key,sizeInBytes \
             --jq ".[] | select(.key | contains(\"$RUN\")) | \"\(.key) \(.sizeInBytes)\"" | tee caches.txt
           lxd=$(grep -c -- "${RUN}lxd-" caches.txt || true)
           warm=$(grep -c -- "${RUN}warm-" caches.txt || true)
