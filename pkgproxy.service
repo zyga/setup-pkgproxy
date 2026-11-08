@@ -18,7 +18,7 @@ RuntimeDirectory=pkgproxy
 CacheDirectory=pkgproxy
 # $RUNTIME_DIRECTORY/$CACHE_DIRECTORY are set by systemd from the directives
 # above, so the paths stay in one place (the directives), not repeated here.
-# @ADDR@ is substituted by the action's start.sh with the configured listen
+# @ADDR@ is substituted by the action's main step (src/daemon.ts) with the listen
 # address.
 ExecStart=/usr/local/bin/pkgproxy \
     -addr @ADDR@ \
