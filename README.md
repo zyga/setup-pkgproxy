@@ -1,62 +1,68 @@
 # setup-pkgproxy
 
-A composite GitHub Action that builds and runs
+A GitHub Action that builds and runs
 [pkgproxy](https://gitlab.com/zygoon/pkgproxy) as a caching proxy for apt,
-snap store, Go module, Docker Hub image, and LXD image traffic on a GitHub Actions runner.
+snap store, Go module, Docker Hub image, and LXD image traffic on a GitHub
+Actions runner, and saves its cache at the end of the job.
 
 ## What it does
 
 1. Restores a cached `pkgproxy` binary (keyed on `version`, `go-version`, and
-   runner arch), or builds it with `go install` on a cache miss.
+   runner arch), or builds it with `go install` on a cache miss, with Go
+   from the runner's tool cache or from go.dev.
 2. Installs the binary to `/usr/local/bin/pkgproxy` (and a `pkgproxyctl`
    symlink — the binary dispatches on `argv[0]`).
-3. Restores a persistent payload cache at `/var/cache/pkgproxy`.
+3. Restores the newest package cache for this arch to `/var/cache/pkgproxy`.
 4. Installs and starts a `pkgproxy.service` systemd unit. Its
    `RuntimeDirectory=`/`CacheDirectory=` directives create `/run/pkgproxy`
    and `/var/cache/pkgproxy` and own them appropriately.
 5. Optionally points the host's `apt` and `snapd` at the proxy
    (`pkgproxyctl setup apt` / `setup snap`).
+6. At the end of the job, passed or failed, stops pkgproxy and saves the
+   package cache, if the job added to it, under a key unique to the job.
+   The job summary shows what was restored and saved, and `pkgproxyctl
+   stats`.
 
 The caller is responsible for pointing any other tools at the proxy (e.g.
-`pkgproxyctl setup snapcraft`, `pkgproxyctl setup lxd-remote`) and for saving
-the payload cache at the end of the job.
+`pkgproxyctl setup snapcraft`, `pkgproxyctl setup lxd-remote`).
 
 ## Usage
 
 ```yaml
 - name: Set up pkgproxy caching proxy
   id: pkgproxy
-  uses: zyga/setup-pkgproxy@v1
+  uses: zyga/setup-pkgproxy@v2
   # version: defaults to this action's pinned pkgproxy release; only pass it
   # to override.
-
-# ... later, after the job's real work:
-
-# pkgproxy.service runs as root, so everything under cache-dir is root-owned
-# while the daemon is up. Stop it and hand the directory back to the runner
-# user first, or actions/cache/save (which runs unprivileged) can fail to
-# read it.
-- name: Prepare pkgproxy cache for saving
-  if: always()
-  shell: bash
-  run: |
-    sudo systemctl stop pkgproxy.service || true
-    sudo chown -R "$USER:$USER" ${{ steps.pkgproxy.outputs.cache-dir }}
-
-# Save only on a miss (GitHub caches are immutable, so re-saving an exact
-# hit is wasted writes) — restore-keys already lets a partial cache warm
-# the next run:
-- if: steps.pkgproxy.outputs.package-cache-hit != 'true'
-  uses: actions/cache/save@v6
-  with:
-    path: ${{ steps.pkgproxy.outputs.cache-dir }}
-    key: ${{ steps.pkgproxy.outputs.package-cache-key-success }}
 ```
 
-If the job can fail after the cache is warmed but before it would normally
-be saved, save under `package-cache-key-partial` instead in an `if: failure()`
-step, so the next run's `restore-keys` fallback still picks up that partial
-progress.
+That is all: there is no save step to add.
+
+### How the package cache is kept
+
+GitHub caches cannot be overwritten, so each job that adds to the package
+cache saves it under a key of its own,
+`<package-cache-key>-<arch>-<run id>-<attempt>-<job>-<random>`, and the next
+job restores the newest cache under `<package-cache-key>-<arch>-`. The cache
+therefore keeps up with what your jobs download, and GitHub evicts the old
+copies (caches unused for 7 days, and the oldest beyond the repository's size
+limit).
+
+A job that adds nothing, because everything it needed was already cached,
+saves nothing. The check compares the paths and sizes of the cache's files
+right after restore and at the end of the job, ignoring pkgproxy's
+`stats.json`. A failed or cancelled job's cache is saved too: what pkgproxy
+cached is valid, only less complete.
+
+### Upgrading from v1
+
+- Delete the "Prepare pkgproxy cache for saving" and `actions/cache/save`
+  steps: the action saves the cache itself, and a save of your own would
+  only fail with "cache already exists" or upload the cache twice.
+- The outputs `package-cache-hit`, `package-cache-key-success` and
+  `package-cache-key-partial` are gone; see [Outputs](#outputs).
+- `package-cache-key` keeps its default, so the cache v1 saved warms the
+  first v2 run.
 
 ## Setting up each proxy client
 
@@ -244,22 +250,21 @@ run in either order, as long as both finish before `snapcraft pack` runs.
 
 Bumping the pinned pkgproxy `version` is a one-file change here (this
 action's `version` default) — callers that don't pass `version:` explicitly
-pick it up automatically on their next `@v1` resolution.
+pick it up automatically on their next `@v2` resolution.
 
 ## Outputs
 
-| Output                      | Description                                                                 |
-| --------------------------- | --------------------------------------------------------------------------- |
-| `addr`                      | The resolved listen address (echoes the `addr` input).                      |
-| `cache-dir`                 | The payload cache directory (`/var/cache/pkgproxy`) — save this at job end. |
-| `package-cache-hit`         | `'true'` when the stable success key restored exactly.                      |
-| `package-cache-key-success` | Stable per-arch key to save under on success.                               |
-| `package-cache-key-partial` | Stable per-arch key to save under when the job fails.                       |
+| Output                       | Description                                                                 |
+| ---------------------------- | --------------------------------------------------------------------------- |
+| `addr`                       | The resolved listen address (echoes the `addr` input).                      |
+| `cache-dir`                  | The payload cache directory (`/var/cache/pkgproxy`).                        |
+| `package-cache-restored-key` | The key the package cache was restored from, or empty on a cold start.      |
+| `package-cache-key`          | The key the post step saves the package cache under, if the job adds to it. |
 
 ## Versioning
 
 Releases are tagged `vX.Y.Z`, with a floating `vX` tag moved to the latest
-release in that major version — pin to `zyga/setup-pkgproxy@v1` and get
+release in that major version — pin to `zyga/setup-pkgproxy@v2` and get
 compatible updates (including pkgproxy version bumps) automatically.
 
 Each major version is maintained on its own long-lived branch,
