@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Zygmunt Krynicki
+#
+# Minimal snap built by CI to check that snapcraft's LXD build container gets
+# its base image and its apt packages through pkgproxy.
+name: setup-pkgproxy-hello
+base: core24
+version: "0"
+summary: CI fixture for setup-pkgproxy
+description: CI fixture for setup-pkgproxy; never published.
+grade: devel
+confinement: strict
+parts:
+  hello:
+    plugin: nil
+    stage-packages: [hello]
+apps:
+  hello:
+    command: usr/bin/hello

@@ -1,0 +1,134 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Zygmunt Krynicki
+#
+# Exercise the action, and the LXD/snapcraft setup the README documents, on
+# GitHub-hosted runners. A full run builds a snap on three runners, so it
+# runs only for merges to main and for release tags (v1.2.3 and the floating
+# v1), where drift in the runner images (LXD preinstalled or not, the runner
+# user's groups, LXD's version) matters, for pull requests that change this
+# workflow or what it tests, and by hand from the Actions tab.
+name: CI
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - .github/workflows/ci.yaml
+      - action.yaml
+      - build.sh
+      - start.sh
+      - pkgproxy.service
+      - tests/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lxd:
+    name: LXD and snapcraft (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Report the runner image
+        run: |
+          set -x
+          cat /etc/os-release
+          id
+          getent group lxd || true
+          snap list lxd || true
+
+      - name: Set up pkgproxy
+        id: pkgproxy
+        uses: ./
+
+      # The steps below follow the README's LXD sections ("LXD access on
+      # GitHub-hosted runners", lxd, lxd-remote, snapcraft) verbatim; keep
+      # the two in sync.
+      - name: Install and initialise LXD
+        run: |
+          snap list lxd >/dev/null 2>&1 || sudo snap install lxd
+          sudo lxd waitready
+          sudo lxc storage list --format csv | grep -q . || sudo lxd init --auto
+          sudo usermod -aG lxd "$USER"
+          snap list lxd
+
+      - name: Point LXD's image remotes at pkgproxy
+        env:
+          ADDR: ${{ steps.pkgproxy.outputs.addr }}
+        run: |
+          sg lxd -c 'lxc remote list >/dev/null && pkgproxyctl setup lxd-remote -addr "$ADDR" | sh'
+
+      - name: Point snapcraft's build containers at pkgproxy
+        env:
+          ADDR: ${{ steps.pkgproxy.outputs.addr }}
+        run: |
+          sg lxd -c 'pkgproxyctl setup snapcraft -addr "$ADDR" | sh'
+
+      - name: Verify the pkgproxy LXC hooks are in the snapcraft profile
+        run: |
+          RAW_LXC=$(sg lxd -c 'lxc profile get default raw.lxc --project snapcraft')
+          if ! printf '%s\n' "$RAW_LXC" | grep -q '^lxc.hook.pre-start = ' ||
+             ! printf '%s\n' "$RAW_LXC" | grep -q '^lxc.hook.post-stop = '; then
+            echo "::error::pkgproxy LXC hooks missing from the snapcraft project's default profile" >&2
+            exit 1
+          fi
+
+      - name: Set up the standalone pkgproxy LXD profile
+        env:
+          ADDR: ${{ steps.pkgproxy.outputs.addr }}
+        run: |
+          sg lxd -c 'pkgproxyctl setup lxd -addr "$ADDR" | sh'
+          RAW_LXC=$(sg lxd -c 'lxc profile get pkgproxy raw.lxc')
+          if ! printf '%s\n' "$RAW_LXC" | grep -q '^lxc.hook.pre-start = '; then
+            echo "::error::pkgproxy LXC hooks missing from the pkgproxy profile" >&2
+            exit 1
+          fi
+
+      - name: Report what pkgproxy set up
+        run: sg lxd -c 'pkgproxyctl setup status | sh'
+
+      - name: Install snapcraft
+        run: sudo snap install snapcraft --classic
+
+      - name: Build a snap in an LXD container
+        working-directory: tests/hello-snap
+        run: sg lxd -c 'snapcraft pack --use-lxd --verbose'
+
+      # pkgproxyctl stats lists only cache hits, and a fresh runner has none
+      # yet, so read pkgproxy's access log instead: one "handled request"
+      # line per request, with its handler and outcome.
+      - name: Check that the build went through pkgproxy
+        run: |
+          sudo journalctl -u pkgproxy.service -o cat --no-pager |
+            grep 'msg="handled request"' >"$RUNNER_TEMP/access.log" || true
+          echo "Requests by handler and outcome:"
+          grep -o -E 'handler=[a-z]+ outcome=[a-z]+' "$RUNNER_TEMP/access.log" | sort | uniq -c
+          # The bridge address the snapcraft profile gives pkgproxy, as
+          # 10.x.y.1; build containers come from the same /24.
+          BRIDGE=$(sg lxd -c 'lxc network get lxdbr0 ipv4.address' | cut -d/ -f1)
+          NET=${BRIDGE%.*}.
+          fail=0
+          expect() {
+            if grep -E "$2" "$RUNNER_TEMP/access.log" | grep -q -F "$3"; then
+              echo "ok: $1"
+            else
+              echo "::error::$1: no matching request in pkgproxy's access log" >&2
+              fail=1
+            fi
+          }
+          expect "LXD base image via pkgproxy" 'handler=lxd .*outcome=(fetched|hit|joined|revalidated)' 'craft-com.ubuntu.cloud-buildd'
+          expect "staged apt package from the build container" 'url=http://[^ ]*/hello_[^ ]*\.deb .*handler=apt .*outcome=(fetched|hit|joined)' "remote_addr=$NET"
+          expect "snaps from the build container" 'handler=snap .*outcome=(fetched|hit|joined|passthrough)' "remote_addr=$NET"
+          exit "$fail"
+
+      - name: Dump pkgproxy's log
+        if: ${{ always() }}
+        run: sudo journalctl -u pkgproxy.service --no-pager -n 300 || true

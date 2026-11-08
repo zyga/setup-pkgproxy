@@ -102,6 +102,40 @@ Adds pkgproxy as a Docker Hub registry mirror in the Docker daemon's
 of `configure-host`. Only anonymous pulls of public images are cached; the
 mirror is served on the same `addr` as apt/snap/go.
 
+### LXD access on GitHub-hosted runners
+
+The `lxd`, `lxd-remote`, `snapcraft`, `rockcraft` and `charmcraft` setups
+below all talk to LXD, and so does the build tool itself. On GitHub-hosted
+runners:
+
+- `ubuntu-22.04` ships the LXD 5.0 snap; `ubuntu-24.04` and
+  `ubuntu-24.04-arm` ship no LXD at all.
+- The `runner` user is not in the `lxd` group, so `lxc` fails with
+  `permission denied` on LXD's socket.
+- `sudo usermod -aG lxd "$USER"` does not help later steps on its own:
+  the runner starts every step with the groups it was started with.
+  Run each command that needs LXD through `sg lxd -c '...'` instead.
+
+So install LXD if needed, initialise it, and add the runner user to the
+group once:
+
+```yaml
+- name: Install and initialise LXD
+  run: |
+    snap list lxd >/dev/null 2>&1 || sudo snap install lxd
+    sudo lxd waitready
+    sudo lxc storage list --format csv | grep -q . || sudo lxd init --auto
+    sudo usermod -aG lxd "$USER"
+```
+
+and wrap every later LXD command in `sg lxd -c '...'`, as the examples
+below do. Pass the address through `env:` rather than splicing
+`${{ ... }}` into the single-quoted `sg` command.
+
+This repository's CI runs exactly these steps, followed by a real
+`snapcraft pack`, on all three runner images for every merge and release,
+so a release is known to work on the images current at the time.
+
 ### lxd — containers as pkgproxy clients
 
 Routes apt/snap/go traffic from *inside* LXD containers through pkgproxy —
@@ -109,7 +143,9 @@ the opposite direction from `lxd-remote` below. Used by anything that
 launches build containers via LXD:
 
 ```yaml
-- run: pkgproxyctl setup lxd -addr "${{ steps.pkgproxy.outputs.addr }}" | sudo sh
+- env:
+    ADDR: ${{ steps.pkgproxy.outputs.addr }}
+  run: sg lxd -c 'pkgproxyctl setup lxd -addr "$ADDR" | sh'
 ```
 
 With no `-project`, this creates a standalone `pkgproxy` LXD profile that you
@@ -123,12 +159,14 @@ pkgproxy automatically — see `snapcraft` below, which is exactly this with
 
 Adds pkgproxy as a cached LXD image-server remote (`lxc remote add`) — the
 opposite direction from `lxd`/`snapcraft`. Run as the user whose LXD client
-config you're setting up (no `sudo`):
+config you're setting up: the script refuses to run under `sudo`, so on a
+GitHub-hosted runner `sg lxd` is the only way to give it LXD access:
 
 ```yaml
-- run: |
-    lxc remote list >/dev/null  # make sure the LXD client config dir exists first
-    pkgproxyctl setup lxd-remote -addr "${{ steps.pkgproxy.outputs.addr }}" | sh
+- env:
+    ADDR: ${{ steps.pkgproxy.outputs.addr }}
+  # lxc remote list first makes sure the LXD client config dir exists.
+  run: sg lxd -c 'lxc remote list >/dev/null && pkgproxyctl setup lxd-remote -addr "$ADDR" | sh'
 ```
 
 A plain `lxc remote add --accept-certificate` doesn't work for
@@ -158,8 +196,13 @@ example `lxd init --auto`) so that profile has a root disk and a NIC:
 
 ```yaml
 - name: Configure pkgproxy for snapcraft build containers
-  run: pkgproxyctl setup snapcraft -addr "${{ steps.pkgproxy.outputs.addr }}" | sudo sh
+  env:
+    ADDR: ${{ steps.pkgproxy.outputs.addr }}
+  run: sg lxd -c 'pkgproxyctl setup snapcraft -addr "$ADDR" | sh'
 ```
+
+The same goes for the build itself, which also needs LXD:
+`sg lxd -c 'snapcraft pack --use-lxd'`.
 
 The profile carries everything in its own `raw.lxc`: a pre-start hook that
 writes apt/snapd proxy configuration into the container, and a post-stop
@@ -169,7 +212,7 @@ than deep inside `snapcraft pack`, check that both hooks are in place:
 ```yaml
 - name: Verify the pkgproxy LXC hooks are in the snapcraft profile
   run: |
-    RAW_LXC=$(lxc profile get default raw.lxc --project snapcraft)
+    RAW_LXC=$(sg lxd -c 'lxc profile get default raw.lxc --project snapcraft')
     if ! printf '%s\n' "$RAW_LXC" | grep -q '^lxc.hook.pre-start = ' ||
        ! printf '%s\n' "$RAW_LXC" | grep -q '^lxc.hook.post-stop = '; then
       echo "::error::pkgproxy LXC hooks missing from the snapcraft project's default profile" >&2
