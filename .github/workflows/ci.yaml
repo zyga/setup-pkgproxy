@@ -5,7 +5,7 @@
 # GitHub-hosted runners, then save the package cache as the README says
 # and check that a second job restores it, extended attributes included. A
 # full run builds a snap on three runners, so it runs only for merges to
-# main and to release branches (releases/v1), for release tags (v1.2.3 and
+# main and to release branches (releases/v1), for release tags (v1.2.3, not
 # the floating v1), where drift in the runner images (LXD preinstalled or
 # not, the runner user's groups, LXD's version) matters, for pull requests
 # that change this workflow or what it tests, and by hand from the Actions
@@ -14,7 +14,9 @@ name: CI
 on:
   push:
     branches: [main, "releases/**"]
-    tags: ["v*"]
+    # Version tags only: a floating v1/v2 tag points at a commit its
+    # version tag already ran for.
+    tags: ["v*.*.*"]
   pull_request:
     paths:
       - .github/workflows/ci.yaml
