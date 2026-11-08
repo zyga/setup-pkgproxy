@@ -1,0 +1,35 @@
+{
+  "name": "setup-pkgproxy",
+  "private": true,
+  "description": "GitHub Action that builds and runs pkgproxy, saving its cache at the end of the job",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "imports": {
+    "#vendor": {
+      "types": "./src/vendor.mts",
+      "default": "./dist/vendor.mjs"
+    }
+  },
+  "scripts": {
+    "build": "rm -rf dist && npm run -s build:vendor && npm run -s build:action",
+    "typecheck": "tsc --noEmit",
+    "test": "rm -rf .test && esbuild 'src/*.test.ts' --bundle --platform=node --target=node22 --format=esm --packages=external --outdir=.test --out-extension:.js=.mjs --log-level=warning && node --test '.test/*.test.mjs'",
+    "check": "npm run typecheck && npm test && npm run build",
+    "build:vendor": "esbuild src/vendor.mts --bundle --platform=node --target=node24 --format=esm --legal-comments=external --banner:js=\"import { createRequire as __createRequire } from 'node:module'; const require = __createRequire(import.meta.url);\" --minify --outfile=dist/vendor.mjs",
+    "build:action": "esbuild src/main.ts src/post.ts --bundle --platform=node --target=node24 --format=esm --legal-comments=external --banner:js=\"import { createRequire as __createRequire } from 'node:module'; const require = __createRequire(import.meta.url);\" --external:#vendor --loader:.service=text --outdir=dist --out-extension:.js=.mjs"
+  },
+  "dependencies": {
+    "@actions/cache": "6.3.0",
+    "@actions/core": "3.0.1",
+    "@actions/exec": "3.0.0",
+    "@actions/tool-cache": "4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "esbuild": "0.28.2",
+    "typescript": "7.0.2"
+  }
+}

@@ -1,0 +1,381 @@
+import { createRequire as __createRequire } from 'node:module'; const require = __createRequire(import.meta.url);
+
+// src/main.ts
+import { randomBytes } from "node:crypto";
+import { access, mkdir, readFile, writeFile } from "node:fs/promises";
+import { join as join3 } from "node:path";
+import { cache, core as core2, exec as exec2 } from "#vendor";
+
+// src/daemon.ts
+import { rm, stat } from "node:fs/promises";
+import { setTimeout as sleep } from "node:timers/promises";
+import { exec } from "#vendor";
+
+// pkgproxy.service
+var pkgproxy_default = `# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Zygmunt Krynicki
+#
+# pkgproxy caching proxy daemon. Installed to /etc/systemd/system/ by the
+# setup-pkgproxy action. RuntimeDirectory=/CacheDirectory= make systemd create
+# /run/pkgproxy and /var/cache/pkgproxy (recursively chowning the latter to root
+# at start, since the unit runs as root), so no manual mkdir/chown is needed.
+[Unit]
+Description=pkgproxy caching proxy (apt, snap, go modules, LXD images)
+Documentation=https://gitlab.com/zygoon/pkgproxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Restart=no
+RuntimeDirectory=pkgproxy
+CacheDirectory=pkgproxy
+# $RUNTIME_DIRECTORY/$CACHE_DIRECTORY are set by systemd from the directives
+# above, so the paths stay in one place (the directives), not repeated here.
+# @ADDR@ is substituted by the action's main step (src/daemon.ts) with the listen
+# address.
+ExecStart=/usr/local/bin/pkgproxy \\
+    -addr @ADDR@ \\
+    -cache-dir \${CACHE_DIRECTORY} \\
+    -stats-socket-path \${RUNTIME_DIRECTORY}/stats.sock \\
+    -admin-socket-path \${RUNTIME_DIRECTORY}/admin.sock
+# Once pkgproxy has stopped, archive its cache for actions/cache to save.
+# pkgproxy 0.12 keeps each cached file's metadata in an extended attribute
+# (user.pkgproxy.meta), and actions/cache's own tar drops extended
+# attributes, so the action restores and saves this archive rather than the
+# cache directory. Written under a temporary name and renamed, so a stop cut
+# short leaves no half-written archive to save. Not in CacheDirectory=, whose
+# list would turn $CACHE_DIRECTORY into a colon-separated one.
+ExecStopPost=/bin/sh -c 'mkdir -p /var/cache/pkgproxy-archive && tar --xattrs --xattrs-include="user.*" -cf /var/cache/pkgproxy-archive/cache.tar.tmp -C "$CACHE_DIRECTORY" . && mv /var/cache/pkgproxy-archive/cache.tar.tmp /var/cache/pkgproxy-archive/cache.tar'
+# The archive of a large cache (a snap build's is several hundred MB) can
+# take longer than the default 90 seconds.
+TimeoutStopSec=15min
+
+[Install]
+WantedBy=multi-user.target
+`;
+
+// src/daemon.ts
+var UNIT = "pkgproxy.service";
+var CACHE_DIR = "/var/cache/pkgproxy";
+var ARCHIVE_DIR = "/var/cache/pkgproxy-archive";
+var ARCHIVE = `${ARCHIVE_DIR}/cache.tar`;
+var TAR_XATTRS = ["--xattrs", "--xattrs-include=user.*"];
+var RUNTIME_DIR = "/run/pkgproxy";
+var SOCKETS = [`${RUNTIME_DIR}/stats.sock`, `${RUNTIME_DIR}/admin.sock`];
+function renderUnit(template, addr) {
+  return template.replaceAll("@ADDR@", addr);
+}
+async function sudo(args, options = {}) {
+  return exec.exec("sudo", args, options);
+}
+async function start(addr) {
+  await sudo(["mkdir", "-p", "/etc/systemd/system"]);
+  await sudo(["tee", `/etc/systemd/system/${UNIT}`], {
+    input: Buffer.from(renderUnit(pkgproxy_default, addr)),
+    silent: true
+  });
+  await sudo(["systemctl", "daemon-reload"]);
+  await sudo(["systemctl", "start", UNIT]);
+  for (let i = 0; i < 100; i++) {
+    if (await allSockets()) {
+      return;
+    }
+    await sleep(100);
+  }
+  await dumpStatus();
+  throw new Error("pkgproxy did not create its control sockets in time");
+}
+async function allSockets() {
+  for (const path of SOCKETS) {
+    try {
+      if (!(await stat(path)).isSocket()) {
+        return false;
+      }
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+async function dumpStatus() {
+  await sudo(["systemctl", "status", UNIT, "--no-pager"], { ignoreReturnCode: true });
+  await sudo(["journalctl", "-u", UNIT, "--no-pager", "-n", "100"], { ignoreReturnCode: true });
+}
+async function configureHost(addr) {
+  for (const client of ["apt", "snap"]) {
+    await exec.exec("bash", ["-c", `set -o pipefail; pkgproxyctl setup ${client} -addr "$ADDR" | sudo sh`], {
+      env: { ...process.env, ADDR: addr }
+    });
+  }
+}
+function runnerOwner() {
+  const uid = process.getuid?.();
+  const gid = process.getgid?.();
+  if (uid === void 0 || gid === void 0) {
+    throw new Error("cannot tell the runner user's uid and gid");
+  }
+  return `${uid}:${gid}`;
+}
+async function releaseDirs() {
+  await sudo(["mkdir", "-p", CACHE_DIR, ARCHIVE_DIR]);
+  await sudo(["chown", "-R", runnerOwner(), CACHE_DIR, ARCHIVE_DIR]);
+}
+async function extractArchive() {
+  await exec.exec("tar", [...TAR_XATTRS, "-xf", ARCHIVE, "-C", CACHE_DIR]);
+  await rm(ARCHIVE, { force: true });
+}
+
+// src/go.ts
+import { createHash } from "node:crypto";
+import { createReadStream } from "node:fs";
+import { join } from "node:path";
+import { core, tc } from "#vendor";
+var GO_DL = "https://go.dev/dl/";
+function goArch(nodeArch) {
+  switch (nodeArch) {
+    case "x64":
+      return "amd64";
+    case "arm64":
+      return "arm64";
+    default:
+      throw new Error(`unsupported runner CPU arch for Go: ${nodeArch}`);
+  }
+}
+async function publishedSha256(filename) {
+  const res = await fetch(`${GO_DL}?mode=json&include=all`);
+  if (!res.ok) {
+    throw new Error(`cannot list Go releases: ${GO_DL} answered HTTP ${res.status}`);
+  }
+  const releases = await res.json();
+  for (const r of releases) {
+    for (const f of r.files) {
+      if (f.filename === filename) {
+        return f.sha256;
+      }
+    }
+  }
+  throw new Error(`go.dev lists no ${filename}: is the go-version input a real Go release?`);
+}
+async function sha256File(path) {
+  const hash = createHash("sha256");
+  for await (const chunk of createReadStream(path)) {
+    hash.update(chunk);
+  }
+  return hash.digest("hex");
+}
+async function ensureGo(version) {
+  const cached = tc.find("go", version);
+  if (cached) {
+    core.info(`Using Go ${version} from the tool cache: ${cached}`);
+    return join(cached, "bin");
+  }
+  const filename = `go${version}.linux-${goArch(process.arch)}.tar.gz`;
+  core.info(`Downloading ${GO_DL}${filename}`);
+  const [archive, want] = await Promise.all([tc.downloadTool(`${GO_DL}${filename}`), publishedSha256(filename)]);
+  const got = await sha256File(archive);
+  if (got !== want) {
+    throw new Error(`${filename} has SHA-256 ${got}, but go.dev publishes ${want}`);
+  }
+  const extracted = await tc.extractTar(archive);
+  const dir = await tc.cacheDir(join(extracted, "go"), "go", version);
+  return join(dir, "bin");
+}
+
+// src/keys.ts
+function binaryCacheKey(prefix, version, goVersion, arch) {
+  return `${prefix}-${version}-go${goVersion}-${arch}`;
+}
+function packageCacheKeys(prefix, arch, id) {
+  const restorePrefix = `${prefix}-${arch}-`;
+  return {
+    save: `${restorePrefix}${id.runId}-${id.runAttempt}-${sanitize(id.job)}-${id.nonce}`,
+    restorePrefix
+  };
+}
+function sanitize(s) {
+  return s.replace(/[^A-Za-z0-9._-]+/g, "_").slice(0, 64) || "job";
+}
+
+// src/manifest.ts
+import { readdir, lstat } from "node:fs/promises";
+import { join as join2, relative } from "node:path";
+var IGNORED = /* @__PURE__ */ new Set(["stats.json"]);
+async function snapshot(dir) {
+  const out = {};
+  let entries;
+  try {
+    entries = await readdir(dir, { recursive: true });
+  } catch (err) {
+    if (err.code === "ENOENT") {
+      return out;
+    }
+    throw err;
+  }
+  for (const entry of entries) {
+    const path = join2(dir, entry);
+    const st = await lstat(path);
+    if (!st.isFile()) {
+      continue;
+    }
+    const rel = relative(dir, path);
+    if (!IGNORED.has(rel)) {
+      out[rel] = st.size;
+    }
+  }
+  return out;
+}
+
+// src/policy.ts
+var POLICIES = ["default-branch", "always", "never"];
+function parsePolicy(value) {
+  const v = value.trim() || "default-branch";
+  if (POLICIES.includes(v)) {
+    return v;
+  }
+  throw new Error(`save-package-cache must be one of ${POLICIES.join(", ")}, not ${JSON.stringify(value)}`);
+}
+function saveDecision(policy, ref, defaultBranch2) {
+  switch (policy) {
+    case "never":
+      return { allowed: false, reason: "save-package-cache is never" };
+    case "always":
+      return { allowed: true, reason: "save-package-cache is always" };
+    case "default-branch":
+      if (!defaultBranch2) {
+        return { allowed: false, reason: "the repository's default branch is unknown" };
+      }
+      if (ref === `refs/heads/${defaultBranch2}`) {
+        return { allowed: true, reason: `${ref} is the default branch` };
+      }
+      return {
+        allowed: false,
+        reason: `${ref} is not the default branch (${defaultBranch2}); runs here restore the default branch's cache`
+      };
+  }
+}
+
+// src/state.ts
+var State = {
+  /** The key the post step saves the package cache under. */
+  saveKey: "save-key",
+  /** The key the package cache was restored from, or "". */
+  restoredKey: "restored-key",
+  /** A JSON file with the cache's manifest right after restore. */
+  manifestPath: "manifest-path",
+  /** "true" when save-package-cache lets this run save the cache. */
+  saveAllowed: "save-allowed",
+  /** Why it may or may not, in words. */
+  saveReason: "save-reason"
+};
+
+// src/main.ts
+function env(name) {
+  const v = process.env[name];
+  if (!v) {
+    throw new Error(`${name} is not set: this action must run in GitHub Actions`);
+  }
+  return v;
+}
+async function exists(path) {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+async function pkgproxyBinary(version, goVersion, prefix, arch) {
+  const binDir = join3(env("RUNNER_TEMP"), "setup-pkgproxy", "bin");
+  const binary = join3(binDir, "pkgproxy");
+  const key = binaryCacheKey(prefix, version, goVersion, arch);
+  const hit = await cache.restoreCache([binDir], key);
+  if (hit && await exists(binary)) {
+    core2.info(`Restored pkgproxy ${version} from cache ${hit}`);
+    return binary;
+  }
+  const goBin = await ensureGo(goVersion);
+  await mkdir(binDir, { recursive: true });
+  await exec2.exec(join3(goBin, "go"), ["install", `gitlab.com/zygoon/pkgproxy/cmd/pkgproxy@${version}`], {
+    env: {
+      ...process.env,
+      GOBIN: binDir,
+      // Build with exactly the toolchain asked for, never a newer one
+      // that go.mod's toolchain line could pull in.
+      GOTOOLCHAIN: "local",
+      PATH: `${goBin}:${process.env.PATH ?? ""}`
+    }
+  });
+  try {
+    await cache.saveCache([binDir], key);
+  } catch (err) {
+    core2.warning(`Cannot cache the pkgproxy binary: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  return binary;
+}
+async function defaultBranch() {
+  const path = process.env.GITHUB_EVENT_PATH;
+  if (!path) {
+    return void 0;
+  }
+  try {
+    const event = JSON.parse(await readFile(path, "utf8"));
+    const branch = event.repository?.default_branch;
+    return typeof branch === "string" && branch ? branch : void 0;
+  } catch {
+    return void 0;
+  }
+}
+async function run() {
+  const policy = parsePolicy(core2.getInput("save-package-cache"));
+  const version = core2.getInput("version", { required: true });
+  const goVersion = core2.getInput("go-version", { required: true });
+  const addr = core2.getInput("addr", { required: true });
+  const configure = core2.getBooleanInput("configure-host");
+  const arch = env("RUNNER_ARCH");
+  const binary = await core2.group(
+    "Build or restore pkgproxy",
+    () => pkgproxyBinary(version, goVersion, core2.getInput("binary-cache-key", { required: true }), arch)
+  );
+  await sudo(["install", "-m", "0755", binary, "/usr/local/bin/pkgproxy"]);
+  await sudo(["ln", "-sf", "pkgproxy", "/usr/local/bin/pkgproxyctl"]);
+  const keys = packageCacheKeys(core2.getInput("package-cache-key", { required: true }), arch, {
+    runId: env("GITHUB_RUN_ID"),
+    runAttempt: env("GITHUB_RUN_ATTEMPT"),
+    job: env("GITHUB_JOB"),
+    nonce: randomBytes(3).toString("hex")
+  });
+  const restored = await core2.group("Restore the package cache", async () => {
+    await releaseDirs();
+    const key = await cache.restoreCache([ARCHIVE_DIR], keys.save, [keys.restorePrefix]) ?? "";
+    if (key) {
+      core2.info(`Restored the package cache from ${key}`);
+      await extractArchive();
+    } else {
+      core2.info(`No package cache under ${keys.restorePrefix} yet`);
+    }
+    const manifest = await snapshot(CACHE_DIR);
+    const manifestPath = join3(env("RUNNER_TEMP"), `setup-pkgproxy-manifest-${keys.save}.json`);
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    core2.info(`${Object.keys(manifest).length} files in the package cache`);
+    const decision = saveDecision(policy, env("GITHUB_REF"), await defaultBranch());
+    core2.info(`The post step ${decision.allowed ? "may save" : "will not save"} the package cache: ${decision.reason}.`);
+    core2.saveState(State.manifestPath, manifestPath);
+    core2.saveState(State.restoredKey, key);
+    core2.saveState(State.saveAllowed, decision.allowed ? "true" : "false");
+    core2.saveState(State.saveReason, decision.reason);
+    core2.saveState(State.saveKey, keys.save);
+    return { key, allowed: decision.allowed };
+  });
+  await core2.group("Start pkgproxy", () => start(addr));
+  if (configure) {
+    await core2.group("Point apt and snapd at pkgproxy", () => configureHost(addr));
+  }
+  core2.setOutput("addr", addr);
+  core2.setOutput("cache-dir", CACHE_DIR);
+  core2.setOutput("package-cache-restored-key", restored.key);
+  core2.setOutput("package-cache-key", restored.allowed ? keys.save : "");
+}
+run().catch((err) => {
+  core2.setFailed(err instanceof Error ? err.message : String(err));
+});

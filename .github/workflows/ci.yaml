@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Zygmunt Krynicki
 #
 # Exercise the action, and the LXD/snapcraft setup the README documents, on
-# GitHub-hosted runners. A full run builds a snap on three runners, so it
-# runs only for merges to main and to release branches (releases/v1), for
-# release tags (v1.2.3 and the floating v1), where drift in the runner images (LXD preinstalled or not, the runner
-# user's groups, LXD's version) matters, for pull requests that change this
-# workflow or what it tests, and by hand from the Actions tab.
+# GitHub-hosted runners, then check that the post step saved the package
+# cache and that a second job restores it. A full run builds a snap on three
+# runners, so it runs only for merges to main and to release branches, for
+# release tags, for pull requests that change this workflow or what it
+# tests, and by hand from the Actions tab. check.yaml has the cheap checks.
 name: CI
 on:
   push:
@@ -16,8 +16,10 @@ on:
     paths:
       - .github/workflows/ci.yaml
       - action.yaml
-      - build.sh
-      - start.sh
+      - dist/**
+      - src/**
+      - package.json
+      - package-lock.json
       - pkgproxy.service
       - tests/**
   workflow_dispatch:
@@ -48,6 +50,10 @@ jobs:
       - name: Set up pkgproxy
         id: pkgproxy
         uses: ./
+        with:
+          # Pull request and release branch runs must save too, for the warm
+          # jobs to restore.
+          save-package-cache: always
 
       # The steps below follow the README's LXD sections ("LXD access on
       # GitHub-hosted runners", lxd, lxd-remote, snapcraft) verbatim; keep
@@ -129,6 +135,108 @@ jobs:
           expect "snaps from the build container" 'handler=snap .*outcome=(fetched|hit|joined|passthrough)' "remote_addr=$NET"
           exit "$fail"
 
+      # pkgproxy 0.12 keeps each cached file's metadata in a user.* extended
+      # attribute, which the cache must keep: mark a file of the cache so
+      # that the warm jobs can check the attribute came back.
+      - name: Set an extended attribute in the cache for the warm jobs
+        env:
+          VALUE: ${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.os }}
+        run: |
+          echo probe | sudo tee /var/cache/pkgproxy/ci-xattr-probe >/dev/null
+          sudo python3 -c 'import os, sys; os.setxattr(sys.argv[1], "user.setup-pkgproxy.ci", sys.argv[2].encode())' \
+            /var/cache/pkgproxy/ci-xattr-probe "$VALUE"
+
       - name: Dump pkgproxy's log
         if: ${{ always() }}
         run: sudo journalctl -u pkgproxy.service --no-pager -n 300 || true
+
+  # The lxd jobs' post steps saved the cache they filled. A second job on the
+  # same arch must restore one of those caches, and, adding nothing to it,
+  # must not save another, whatever save-package-cache says. With the
+  # default, default-branch, it must offer a save key on the default branch
+  # only.
+  warm:
+    name: Warm cache (${{ matrix.os }}, ${{ matrix.policy }})
+    needs: lxd
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+        policy: [always, default-branch]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up pkgproxy
+        id: pkgproxy
+        uses: ./
+        with:
+          save-package-cache: ${{ matrix.policy }}
+
+      - name: Check that the cache came from this run's lxd jobs
+        env:
+          RESTORED: ${{ steps.pkgproxy.outputs.package-cache-restored-key }}
+          WANT: pkgproxy-cache-v4-${{ runner.arch }}-${{ github.run_id }}-${{ github.run_attempt }}-lxd-
+        run: |
+          echo "restored: ${RESTORED:-nothing}"
+          case "$RESTORED" in
+            "$WANT"*) echo "ok: restored the cache an lxd job saved" ;;
+            *) echo "::error::expected a cache under $WANT, restored ${RESTORED:-nothing}" >&2; exit 1 ;;
+          esac
+
+      - name: Check that the cache kept its extended attributes
+        env:
+          WANT: ${{ github.run_id }}-${{ github.run_attempt }}-
+        run: |
+          got=$(sudo python3 -c 'import os, sys; print(os.getxattr(sys.argv[1], "user.setup-pkgproxy.ci").decode())' \
+            /var/cache/pkgproxy/ci-xattr-probe) || got=
+          echo "user.setup-pkgproxy.ci: ${got:-missing}"
+          case "$got" in
+            "$WANT"*) echo "ok: the extended attribute set by an lxd job came back" ;;
+            *) echo "::error::the cache lost its extended attributes: user.setup-pkgproxy.ci is ${got:-missing}, expected $WANT..." >&2; exit 1 ;;
+          esac
+
+      - name: Check whether this run may save
+        env:
+          POLICY: ${{ matrix.policy }}
+          SAVE_KEY: ${{ steps.pkgproxy.outputs.package-cache-key }}
+          DEFAULT_REF: refs/heads/${{ github.event.repository.default_branch }}
+        run: |
+          if [ "$POLICY" = always ] || [ "$GITHUB_REF" = "$DEFAULT_REF" ]; then
+            want=yes
+          else
+            want=no
+          fi
+          got=$([ -n "$SAVE_KEY" ] && echo yes || echo no)
+          echo "policy $POLICY on $GITHUB_REF (default $DEFAULT_REF): may save: $got, expected: $want"
+          [ "$got" = "$want" ] || { echo "::error::save-package-cache $POLICY decided wrongly on $GITHUB_REF" >&2; exit 1; }
+
+  saved-caches:
+    name: Caches saved by this run
+    needs: warm
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+    steps:
+      - name: Check which jobs saved a package cache
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN: -${{ github.run_id }}-${{ github.run_attempt }}-
+        run: |
+          gh cache list --ref "$GITHUB_REF" --key pkgproxy-cache-v4- --limit 100 --json key,sizeInBytes \
+            --jq ".[] | select(.key | contains(\"$RUN\")) | \"\(.key) \(.sizeInBytes)\"" | tee caches.txt
+          lxd=$(grep -c -- "${RUN}lxd-" caches.txt || true)
+          warm=$(grep -c -- "${RUN}warm-" caches.txt || true)
+          echo "lxd jobs saved $lxd caches, warm jobs saved $warm"
+          fail=0
+          if [ "$lxd" -ne 3 ]; then
+            echo "::error::each of the 3 lxd jobs should have saved its cache, $lxd did" >&2
+            fail=1
+          fi
+          if [ "$warm" -ne 0 ]; then
+            echo "::error::warm jobs added nothing to the cache, yet saved $warm; see their post step's job summary" >&2
+            fail=1
+          fi
+          exit "$fail"
