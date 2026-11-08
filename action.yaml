@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Zygmunt Krynicki
 name: Setup pkgproxy
 description: >-
-  Build and run pkgproxy: a caching proxy for apt, snap, Go modules, Docker
-  Hub and LXD image traffic in CI, with its cache saved at the end of the job.
+  Run pkgproxy, a caching proxy for apt, snap, Go modules, Docker Hub and LXD
+  images in CI, keeping its cache between jobs.
 inputs:
   version:
     description: >-
