@@ -50,6 +50,10 @@ jobs:
       - name: Set up pkgproxy
         id: pkgproxy
         uses: ./
+        with:
+          # Pull request and release branch runs must save too, for the warm
+          # jobs to restore.
+          save-package-cache: always
 
       # The steps below follow the README's LXD sections ("LXD access on
       # GitHub-hosted runners", lxd, lxd-remote, snapcraft) verbatim; keep
@@ -137,14 +141,17 @@ jobs:
 
   # The lxd jobs' post steps saved the cache they filled. A second job on the
   # same arch must restore one of those caches, and, adding nothing to it,
-  # must not save another.
+  # must not save another, whatever save-package-cache says. With the
+  # default, default-branch, it must offer a save key on the default branch
+  # only.
   warm:
-    name: Warm cache (${{ matrix.os }})
+    name: Warm cache (${{ matrix.os }}, ${{ matrix.policy }})
     needs: lxd
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, ubuntu-24.04-arm]
+        policy: [always, default-branch]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
@@ -153,6 +160,8 @@ jobs:
       - name: Set up pkgproxy
         id: pkgproxy
         uses: ./
+        with:
+          save-package-cache: ${{ matrix.policy }}
 
       - name: Check that the cache came from this run's lxd jobs
         env:
@@ -164,7 +173,21 @@ jobs:
             "$WANT"*) echo "ok: restored the cache an lxd job saved" ;;
             *) echo "::error::expected a cache under $WANT, restored ${RESTORED:-nothing}" >&2; exit 1 ;;
           esac
-          sudo find /var/cache/pkgproxy -maxdepth 1 | sort
+
+      - name: Check whether this run may save
+        env:
+          POLICY: ${{ matrix.policy }}
+          SAVE_KEY: ${{ steps.pkgproxy.outputs.package-cache-key }}
+          DEFAULT_REF: refs/heads/${{ github.event.repository.default_branch }}
+        run: |
+          if [ "$POLICY" = always ] || [ "$GITHUB_REF" = "$DEFAULT_REF" ]; then
+            want=yes
+          else
+            want=no
+          fi
+          got=$([ -n "$SAVE_KEY" ] && echo yes || echo no)
+          echo "policy $POLICY on $GITHUB_REF (default $DEFAULT_REF): may save: $got, expected: $want"
+          [ "$got" = "$want" ] || { echo "::error::save-package-cache $POLICY decided wrongly on $GITHUB_REF" >&2; exit 1; }
 
   saved-caches:
     name: Caches saved by this run
