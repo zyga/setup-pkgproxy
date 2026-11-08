@@ -11,26 +11,26 @@ test("binary key includes version, Go and arch", () => {
 });
 
 test("package keys: unique save key under the restore prefix", () => {
-  const keys = packageCacheKeys("pkgproxy-cache-v3", "ARM64", {
+  const keys = packageCacheKeys("pkgproxy-cache-v4", "ARM64", {
     runId: "42",
     runAttempt: "2",
     job: "build",
     nonce: "abc123",
   });
-  assert.equal(keys.restorePrefix, "pkgproxy-cache-v3-ARM64-");
-  assert.equal(keys.save, "pkgproxy-cache-v3-ARM64-42-2-build-abc123");
+  assert.equal(keys.restorePrefix, "pkgproxy-cache-v4-ARM64-");
+  assert.equal(keys.save, "pkgproxy-cache-v4-ARM64-42-2-build-abc123");
   assert.ok(keys.save.startsWith(keys.restorePrefix));
 });
 
-test("package keys: v1 keys match the v2 restore prefix", () => {
-  const { restorePrefix } = packageCacheKeys("pkgproxy-cache-v3", "X64", {
+test("package keys: v1.2 keys match the v2 restore prefix", () => {
+  const { restorePrefix } = packageCacheKeys("pkgproxy-cache-v4", "X64", {
     runId: "1",
     runAttempt: "1",
     job: "j",
     nonce: "n",
   });
-  assert.ok("pkgproxy-cache-v3-X64-success".startsWith(restorePrefix));
-  assert.ok("pkgproxy-cache-v3-X64-partial".startsWith(restorePrefix));
+  assert.ok("pkgproxy-cache-v4-X64-success".startsWith(restorePrefix));
+  assert.ok("pkgproxy-cache-v4-X64-partial".startsWith(restorePrefix));
 });
 
 test("package keys: job ids are made safe for cache keys", () => {

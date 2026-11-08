@@ -2,29 +2,49 @@ import { createRequire as __createRequire } from 'node:module'; const require = 
 
 // src/post.ts
 import { readFile } from "node:fs/promises";
-import { cache, core as core2 } from "#vendor";
+import { cache, core } from "#vendor";
 
 // src/daemon.ts
-import { core, exec } from "#vendor";
+import { rm, stat } from "node:fs/promises";
+import { exec } from "#vendor";
 var UNIT = "pkgproxy.service";
 var CACHE_DIR = "/var/cache/pkgproxy";
+var ARCHIVE_DIR = "/var/cache/pkgproxy-archive";
+var ARCHIVE = `${ARCHIVE_DIR}/cache.tar`;
 var RUNTIME_DIR = "/run/pkgproxy";
 var SOCKETS = [`${RUNTIME_DIR}/stats.sock`, `${RUNTIME_DIR}/admin.sock`];
 async function sudo(args, options = {}) {
   return exec.exec("sudo", args, options);
 }
+async function dumpStatus() {
+  await sudo(["systemctl", "status", UNIT, "--no-pager"], { ignoreReturnCode: true });
+  await sudo(["journalctl", "-u", UNIT, "--no-pager", "-n", "100"], { ignoreReturnCode: true });
+}
 async function stats() {
   const out = await exec.getExecOutput("pkgproxyctl", ["stats"], { ignoreReturnCode: true, silent: true });
   return out.exitCode === 0 ? out.stdout.trim() : "";
 }
-async function stopAndReleaseCache() {
-  await sudo(["systemctl", "stop", UNIT], { ignoreReturnCode: true });
+function runnerOwner() {
   const uid = process.getuid?.();
   const gid = process.getgid?.();
   if (uid === void 0 || gid === void 0) {
     throw new Error("cannot tell the runner user's uid and gid");
   }
-  await sudo(["chown", "-R", `${uid}:${gid}`, CACHE_DIR]);
+  return `${uid}:${gid}`;
+}
+async function releaseDirs() {
+  await sudo(["mkdir", "-p", CACHE_DIR, ARCHIVE_DIR]);
+  await sudo(["chown", "-R", runnerOwner(), CACHE_DIR, ARCHIVE_DIR]);
+}
+async function stopAndReleaseCache() {
+  await sudo(["systemctl", "stop", UNIT], { ignoreReturnCode: true });
+  await releaseDirs();
+  try {
+    return (await stat(ARCHIVE)).isFile();
+  } catch {
+    await dumpStatus();
+    return false;
+  }
 }
 
 // src/manifest.ts
@@ -101,35 +121,38 @@ function mib(bytes) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
 }
 async function run() {
-  const saveKey = core2.getState(State.saveKey);
+  const saveKey = core.getState(State.saveKey);
   if (!saveKey) {
-    core2.info("The main step did not restore the package cache, so there is nothing to save.");
+    core.info("The main step did not restore the package cache, so there is nothing to save.");
     return;
   }
-  const restoredKey = core2.getState(State.restoredKey);
+  const restoredKey = core.getState(State.restoredKey);
   const statsText = await stats();
-  await stopAndReleaseCache();
-  const before = JSON.parse(await readFile(core2.getState(State.manifestPath), "utf8"));
+  const archived = await stopAndReleaseCache();
+  const before = JSON.parse(await readFile(core.getState(State.manifestPath), "utf8"));
   const d = diff(before, await snapshot(CACHE_DIR));
-  core2.info(
+  core.info(
     `Package cache: ${d.files} files, ${mib(d.bytes)}; ${d.added} added, ${d.removed} removed, ${d.resized} changed size since restore.`
   );
   let outcome;
-  if (core2.getState(State.saveAllowed) !== "true") {
-    outcome = `not saved: ${core2.getState(State.saveReason)}`;
+  if (core.getState(State.saveAllowed) !== "true") {
+    outcome = `not saved: ${core.getState(State.saveReason)}`;
   } else if (!changed(d)) {
     outcome = "not saved: unchanged since restore";
+  } else if (!archived) {
+    outcome = "not saved: pkgproxy's unit did not archive the cache when it stopped (see its status above)";
+    core.warning(`Package cache ${outcome}`);
   } else {
     try {
-      const id = await cache.saveCache([CACHE_DIR], saveKey);
+      const id = await cache.saveCache([ARCHIVE_DIR], saveKey);
       outcome = id === -1 ? "not saved: actions/cache could not save it (see above)" : `saved as ${saveKey}`;
     } catch (err) {
       outcome = `not saved: ${err instanceof Error ? err.message : String(err)}`;
-      core2.warning(`Cannot save the package cache: ${outcome}`);
+      core.warning(`Cannot save the package cache: ${outcome}`);
     }
   }
-  core2.info(`Package cache ${outcome}`);
-  const summary = core2.summary.addHeading("pkgproxy", 3).addTable([
+  core.info(`Package cache ${outcome}`);
+  const summary = core.summary.addHeading("pkgproxy", 3).addTable([
     [
       { data: "Package cache", header: true },
       { data: "", header: true }
@@ -150,5 +173,5 @@ ${statsText}
   await summary.write();
 }
 run().catch((err) => {
-  core2.warning(`setup-pkgproxy post step: ${err instanceof Error ? err.message : String(err)}`);
+  core.warning(`setup-pkgproxy post step: ${err instanceof Error ? err.message : String(err)}`);
 });

@@ -10,7 +10,7 @@ import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { cache, core, exec } from "#vendor";
 
-import { CACHE_DIR, configureHost, start, sudo } from "./daemon.ts";
+import { ARCHIVE_DIR, CACHE_DIR, configureHost, extractArchive, releaseDirs, start, sudo } from "./daemon.ts";
 import { ensureGo } from "./go.ts";
 import { binaryCacheKey, packageCacheKeys } from "./keys.ts";
 import { snapshot } from "./manifest.ts";
@@ -110,12 +110,14 @@ async function run(): Promise<void> {
   });
 
   const restored = await core.group("Restore the package cache", async () => {
-    // actions/cache restores as the runner user. Once the unit starts, its
-    // CacheDirectory= hands the directory to root.
-    await sudo(["mkdir", "-p", CACHE_DIR]);
-    await sudo(["chown", "-R", `${process.getuid?.()}:${process.getgid?.()}`, CACHE_DIR]);
-    const key = (await cache.restoreCache([CACHE_DIR], keys.save, [keys.restorePrefix])) ?? "";
-    core.info(key ? `Restored the package cache from ${key}` : `No package cache under ${keys.restorePrefix} yet`);
+    await releaseDirs();
+    const key = (await cache.restoreCache([ARCHIVE_DIR], keys.save, [keys.restorePrefix])) ?? "";
+    if (key) {
+      core.info(`Restored the package cache from ${key}`);
+      await extractArchive();
+    } else {
+      core.info(`No package cache under ${keys.restorePrefix} yet`);
+    }
 
     const manifest = await snapshot(CACHE_DIR);
     const manifestPath = join(env("RUNNER_TEMP"), `setup-pkgproxy-manifest-${keys.save}.json`);

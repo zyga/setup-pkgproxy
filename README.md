@@ -104,8 +104,19 @@ is still a warm one.
 A job that adds nothing, because everything it needed was already cached,
 saves nothing. The check compares the paths and sizes of the cache's files
 right after restore and at the end of the job, ignoring pkgproxy's
-`stats.json`. A failed or cancelled job's cache is saved too: what pkgproxy
-cached is valid, only less complete.
+`stats.json`. A change to a file's extended attributes alone, as when
+pkgproxy only revalidates a file, is not noticed: it is not worth uploading
+the whole cache for. A failed or cancelled job's cache is saved too: what
+pkgproxy cached is valid, only less complete.
+
+What is saved is an archive of `/var/cache/pkgproxy`, not the directory
+itself. pkgproxy 0.12 keeps what it knows of each cached file in an
+extended attribute of the file (`user.pkgproxy.meta`), and the `tar` that
+`actions/cache` runs drops extended attributes; a file that lost its
+attribute is downloaded again, so the cache would never help. When pkgproxy
+stops, its systemd unit writes `/var/cache/pkgproxy-archive/cache.tar` with
+`tar --xattrs`, which `actions/cache` then saves, and the main step unpacks
+a restored archive the same way.
 
 ### Upgrading from v1
 
@@ -117,8 +128,11 @@ cached is valid, only less complete.
   [Which runs save the cache](#which-runs-save-the-cache).
 - The outputs `package-cache-hit`, `package-cache-key-success` and
   `package-cache-key-partial` are gone; see [Outputs](#outputs).
-- `package-cache-key` keeps its default, so the cache v1 saved warms the
-  first v2 run.
+- The default `package-cache-key` is now `pkgproxy-cache-v4`, for the
+  archive described in [How the package cache is kept](#how-the-package-cache-is-kept).
+  Caches saved by v1.0 and v1.1, a plain directory, are not restored, so the
+  first v2 run on each CPU arch starts cold. v1.2 saves the same archive
+  under the same prefix, so its cache warms v2.
 
 ## Setting up each proxy client
 
@@ -301,7 +315,7 @@ run in either order, as long as both finish before `snapcraft pack` runs.
 | `go-version`         | `1.27.1`            | Go toolchain used to build pkgproxy on a binary-cache miss.               |
 | `addr`               | `:3142`             | Address pkgproxy listens on.                                              |
 | `binary-cache-key`   | `pkgproxy-bin`      | `actions/cache` key prefix for the built binary.                          |
-| `package-cache-key`  | `pkgproxy-cache-v3` | `actions/cache` key prefix for the payload cache.                         |
+| `package-cache-key`  | `pkgproxy-cache-v4` | `actions/cache` key prefix for the payload cache.                         |
 | `configure-host`     | `true`              | Whether to point the host's apt/snapd at the proxy.                       |
 | `save-package-cache` | `default-branch`    | Which runs save the package cache: `default-branch`, `always` or `never`. |
 

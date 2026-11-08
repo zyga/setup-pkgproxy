@@ -10,7 +10,7 @@
 import { readFile } from "node:fs/promises";
 import { cache, core } from "#vendor";
 
-import { CACHE_DIR, stats, stopAndReleaseCache } from "./daemon.ts";
+import { ARCHIVE_DIR, CACHE_DIR, stats, stopAndReleaseCache } from "./daemon.ts";
 import { changed, diff, snapshot, type Manifest } from "./manifest.ts";
 import { State } from "./state.ts";
 
@@ -28,7 +28,7 @@ async function run(): Promise<void> {
 
   // Before stopping pkgproxy, which takes its stats socket down.
   const statsText = await stats();
-  await stopAndReleaseCache();
+  const archived = await stopAndReleaseCache();
 
   const before = JSON.parse(await readFile(core.getState(State.manifestPath), "utf8")) as Manifest;
   const d = diff(before, await snapshot(CACHE_DIR));
@@ -42,9 +42,12 @@ async function run(): Promise<void> {
     outcome = `not saved: ${core.getState(State.saveReason)}`;
   } else if (!changed(d)) {
     outcome = "not saved: unchanged since restore";
+  } else if (!archived) {
+    outcome = "not saved: pkgproxy's unit did not archive the cache when it stopped (see its status above)";
+    core.warning(`Package cache ${outcome}`);
   } else {
     try {
-      const id = await cache.saveCache([CACHE_DIR], saveKey);
+      const id = await cache.saveCache([ARCHIVE_DIR], saveKey);
       outcome = id === -1 ? "not saved: actions/cache could not save it (see above)" : `saved as ${saveKey}`;
     } catch (err) {
       outcome = `not saved: ${err instanceof Error ? err.message : String(err)}`;

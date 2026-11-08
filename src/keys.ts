@@ -33,8 +33,9 @@ export interface JobIdentity {
 /**
  * The package cache keys. Caches are immutable, so each job saves under a
  * key of its own and restore picks the newest cache under the prefix.
- * Keys from v1 (<prefix>-<arch>-success and -partial) match the same
- * prefix, so a v1 cache warms the first v2 run.
+ * Keys from v1.2 and later (<prefix>-<arch>-success and -partial), which
+ * save the same archive, match the same prefix, so their cache warms the
+ * first v2 run.
  */
 export function packageCacheKeys(prefix: string, arch: string, id: JobIdentity): PackageCacheKeys {
   const restorePrefix = `${prefix}-${arch}-`;

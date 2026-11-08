@@ -3,9 +3,9 @@
 
 // pkgproxy as a systemd service on the runner.
 
-import { stat } from "node:fs/promises";
+import { rm, stat } from "node:fs/promises";
 import { setTimeout as sleep } from "node:timers/promises";
-import { core, exec } from "#vendor";
+import { exec } from "#vendor";
 
 // Embedded by esbuild (--loader:.service=text), so the bundle needs no
 // file next to it at runtime.
@@ -13,6 +13,16 @@ import unitTemplate from "../pkgproxy.service";
 
 export const UNIT = "pkgproxy.service";
 export const CACHE_DIR = "/var/cache/pkgproxy";
+/**
+ * What actions/cache restores and saves: an archive of CACHE_DIR, extended
+ * attributes included, which the unit's ExecStopPost= writes when pkgproxy
+ * stops. pkgproxy 0.12 keeps each cached file's metadata in an extended
+ * attribute, and actions/cache's own tar drops them: a file that lost its
+ * attribute is downloaded again, so the cache would never help.
+ */
+export const ARCHIVE_DIR = "/var/cache/pkgproxy-archive";
+export const ARCHIVE = `${ARCHIVE_DIR}/cache.tar`;
+const TAR_XATTRS = ["--xattrs", "--xattrs-include=user.*"];
 export const RUNTIME_DIR = "/run/pkgproxy";
 const SOCKETS = [`${RUNTIME_DIR}/stats.sock`, `${RUNTIME_DIR}/admin.sock`];
 
@@ -79,21 +89,48 @@ export async function stats(): Promise<string> {
   return out.exitCode === 0 ? out.stdout.trim() : "";
 }
 
-/**
- * Stops pkgproxy, which flushes its statistics, and hands the cache to the
- * runner user: the service runs as root, and actions/cache reads the cache
- * as the runner user.
- */
-export async function stopAndReleaseCache(): Promise<void> {
-  await sudo(["systemctl", "stop", UNIT], { ignoreReturnCode: true });
+/** The runner user, as chown takes it. */
+export function runnerOwner(): string {
   const uid = process.getuid?.();
   const gid = process.getgid?.();
   if (uid === undefined || gid === undefined) {
     throw new Error("cannot tell the runner user's uid and gid");
   }
-  await sudo(["chown", "-R", `${uid}:${gid}`, CACHE_DIR]);
+  return `${uid}:${gid}`;
 }
 
-export function warnOnError(what: string): (err: unknown) => void {
-  return (err) => core.warning(`${what}: ${err instanceof Error ? err.message : String(err)}`);
+/**
+ * Makes CACHE_DIR and ARCHIVE_DIR the runner user's, as actions/cache runs
+ * as that user. Once the unit starts, its CacheDirectory= hands CACHE_DIR
+ * back to root.
+ */
+export async function releaseDirs(): Promise<void> {
+  await sudo(["mkdir", "-p", CACHE_DIR, ARCHIVE_DIR]);
+  await sudo(["chown", "-R", runnerOwner(), CACHE_DIR, ARCHIVE_DIR]);
+}
+
+/**
+ * Unpacks a restored archive into CACHE_DIR, extended attributes included,
+ * then removes it: a snap build's cache is several hundred MB, and the
+ * unit writes a new archive when pkgproxy stops.
+ */
+export async function extractArchive(): Promise<void> {
+  await exec.exec("tar", [...TAR_XATTRS, "-xf", ARCHIVE, "-C", CACHE_DIR]);
+  await rm(ARCHIVE, { force: true });
+}
+
+/**
+ * Stops pkgproxy, which flushes its statistics and, through the unit's
+ * ExecStopPost=, archives the cache, then hands both to the runner user.
+ * Returns whether the archive is there to save.
+ */
+export async function stopAndReleaseCache(): Promise<boolean> {
+  await sudo(["systemctl", "stop", UNIT], { ignoreReturnCode: true });
+  await releaseDirs();
+  try {
+    return (await stat(ARCHIVE)).isFile();
+  } catch {
+    await dumpStatus();
+    return false;
+  }
 }

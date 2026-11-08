@@ -25,6 +25,17 @@ ExecStart=/usr/local/bin/pkgproxy \
     -cache-dir ${CACHE_DIRECTORY} \
     -stats-socket-path ${RUNTIME_DIRECTORY}/stats.sock \
     -admin-socket-path ${RUNTIME_DIRECTORY}/admin.sock
+# Once pkgproxy has stopped, archive its cache for actions/cache to save.
+# pkgproxy 0.12 keeps each cached file's metadata in an extended attribute
+# (user.pkgproxy.meta), and actions/cache's own tar drops extended
+# attributes, so the action restores and saves this archive rather than the
+# cache directory. Written under a temporary name and renamed, so a stop cut
+# short leaves no half-written archive to save. Not in CacheDirectory=, whose
+# list would turn $CACHE_DIRECTORY into a colon-separated one.
+ExecStopPost=/bin/sh -c 'mkdir -p /var/cache/pkgproxy-archive && tar --xattrs --xattrs-include="user.*" -cf /var/cache/pkgproxy-archive/cache.tar.tmp -C "$CACHE_DIRECTORY" . && mv /var/cache/pkgproxy-archive/cache.tar.tmp /var/cache/pkgproxy-archive/cache.tar'
+# The archive of a large cache (a snap build's is several hundred MB) can
+# take longer than the default 90 seconds.
+TimeoutStopSec=15min
 
 [Install]
 WantedBy=multi-user.target

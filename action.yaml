@@ -35,14 +35,15 @@ inputs:
     default: pkgproxy-bin
   package-cache-key:
     description: >-
-      actions/cache key prefix for the pkgproxy payload cache
-      (/var/cache/pkgproxy). The main step restores the newest cache under
-      <prefix>-<arch>-, and the post step, at the end of the job, saves the
-      cache under a key unique to the job, when save-package-cache allows it
-      and the job added to the cache. The default matches v1's, so the cache
-      v1 saved warms the first v2 run.
+      actions/cache key prefix for the pkgproxy payload cache: an archive of
+      /var/cache/pkgproxy that keeps extended attributes. The main step
+      restores the newest cache under <prefix>-<arch>-, and the post step, at
+      the end of the job, saves the cache under a key unique to the job, when
+      save-package-cache allows it and the job added to the cache. v1.2 and
+      later save the same archive under the same default prefix, so their
+      cache warms the first v2 run.
     required: false
-    default: pkgproxy-cache-v3
+    default: pkgproxy-cache-v4
   save-package-cache:
     description: >-
       Which runs save the package cache at the end of the job: default-branch
