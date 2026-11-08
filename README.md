@@ -100,8 +100,7 @@ config file — no `sudo` needed).
 Adds pkgproxy as a Docker Hub registry mirror in the Docker daemon's
 `daemon.json` and **restarts the Docker daemon**, which is why it is not part
 of `configure-host`. Only anonymous pulls of public images are cached; the
-mirror is served on the same `addr` as apt/snap/go. Needs `jq` if a
-`daemon.json` already exists.
+mirror is served on the same `addr` as apt/snap/go.
 
 ### lxd — containers as pkgproxy clients
 
@@ -140,42 +139,48 @@ you. Once added, pkgproxy also transparently proxies the exact remote names
 uses for build-base images, so those tools get pkgproxy's cache for free
 with no config on their side.
 
-### snapcraft — extra steps required
+On LXD 6.10 and later, which downloads images only through image
+registries, the script also adds a cluster link to pkgproxy and an image
+registry for each remote. Those belong to the LXD server, not the user, so
+every user of that LXD gets these remotes through pkgproxy.
+
+### snapcraft, rockcraft, charmcraft — LXD build containers
 
 `pkgproxyctl setup snapcraft` is `pkgproxyctl setup lxd -project snapcraft`
 under the hood: snapcraft/craft-providers always builds in an LXD project
 literally named `snapcraft`, so this shorthand saves you from needing to
-know that convention. But craft-providers creates that project **lazily**,
-only when `snapcraft pack` first needs it — so unlike the plain `lxd` case,
-you must pre-create the project and its `default` profile's network/disk
-devices yourself first, or `setup snapcraft` has no profile to patch:
+know that convention. `setup rockcraft` and `setup charmcraft` do the same
+for `rockcraft pack` and `charmcraft pack`. craft-providers creates its
+project lazily, on the first build, so the setup script creates it first if
+it does not exist yet, copying the `default` project's `default` profile as
+craft-providers would. LXD must therefore already be initialised (for
+example `lxd init --auto`) so that profile has a root disk and a NIC:
 
 ```yaml
-- name: Pre-create the snapcraft LXD project
-  run: |
-    lxc project create snapcraft || true
-    lxc profile device add default root disk path=/ pool=default --project snapcraft || true
-    lxc profile device add default eth0 nic network=lxdbr0 name=eth0 --project snapcraft || true
-
 - name: Configure pkgproxy for snapcraft build containers
   run: pkgproxyctl setup snapcraft -addr "${{ steps.pkgproxy.outputs.addr }}" | sudo sh
 ```
 
-Then **verify it actually took**, before running `snapcraft pack`. The setup
-step injects a `raw.lxc` pre-start hook into the profile; if that hook is
-missing or not executable, the failure won't surface here — it surfaces
-minutes later, deep inside the build, as an opaque `lxd forkstart ... exit
-status 1`:
+The profile carries everything in its own `raw.lxc`: a pre-start hook that
+writes apt/snapd proxy configuration into the container, and a post-stop
+hook that removes it, with no file on the LXD host. To fail early rather
+than deep inside `snapcraft pack`, check that both hooks are in place:
 
 ```yaml
-- name: Verify the LXC pre-start hook was provisioned
+- name: Verify the pkgproxy LXC hooks are in the snapcraft profile
   run: |
-    HOOK_PATH=$(lxc profile get default raw.lxc --project snapcraft | sed -n 's/^lxc.hook.pre-start = //p')
-    if [ -z "$HOOK_PATH" ] || ! sudo test -x "$HOOK_PATH"; then
-      echo "::error::pkgproxy pre-start hook not provisioned/executable at '${HOOK_PATH}'" >&2
+    RAW_LXC=$(lxc profile get default raw.lxc --project snapcraft)
+    if ! grep -q '^lxc.hook.pre-start = ' <<<"$RAW_LXC" || ! grep -q '^lxc.hook.post-stop = ' <<<"$RAW_LXC"; then
+      echo "::error::pkgproxy LXC hooks missing from the snapcraft project's default profile" >&2
       exit 1
     fi
 ```
+
+A profile set up by pkgproxy 0.10.0 or earlier pointed at hook files on the
+host that 0.11.0 no longer writes; run the setup command again to replace
+it (`pkgproxyctl setup status | sh` reports this). This only matters for a
+persistent LXD, such as a self-hosted runner; a fresh GitHub-hosted runner
+always sets the profile up from scratch.
 
 Add `lxd-remote` too (see above) if you also want pkgproxy's cache to serve
 the build-base images craft-providers downloads, not just the apt/snap/go
@@ -186,7 +191,7 @@ run in either order, as long as both finish before `snapcraft pack` runs.
 
 | Input               | Default             | Description                                                               |
 | ------------------- | ------------------- | ------------------------------------------------------------------------- |
-| `version`           | `v0.8.0`            | pkgproxy version to build (Go module version string, pinned not `@main`). |
+| `version`           | `v0.11.0`           | pkgproxy version to build (Go module version string, pinned not `@main`). |
 | `go-version`        | `1.27.1`            | Go toolchain used to build pkgproxy on a binary-cache miss.               |
 | `addr`              | `:3142`             | Address pkgproxy listens on.                                              |
 | `binary-cache-key`  | `pkgproxy-bin`      | `actions/cache` key prefix for the built binary.                          |
