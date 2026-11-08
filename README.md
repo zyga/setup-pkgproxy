@@ -36,17 +36,64 @@ The caller is responsible for pointing any other tools at the proxy (e.g.
   # to override.
 ```
 
-That is all: there is no save step to add.
+That is all: there is no save step to add. **Only runs on the default
+branch save the cache**, though, so make sure your workflow also runs on
+pushes to it:
+
+```yaml
+on:
+  push:
+    branches: [main]
+  pull_request:
+```
+
+### Which runs save the cache
+
+By default (`save-package-cache: default-branch`), only runs on the
+repository's default branch save the package cache. Pull requests, other
+branches and tags restore it, and never save one of their own. This
+follows from how GitHub scopes caches:
+
+- A run can restore caches saved on **its own ref**, on **its pull request's
+  base branch**, and on **the default branch**: never those of another pull
+  request or branch.
+- The default branch's cache is the only one every run can restore. One saved
+  by a pull request helps only that pull request's later runs.
+- Every saved cache counts against the repository's cache storage (10 GB by
+  default), and GitHub evicts the least recently used first. The package
+  cache of a single snap build is several hundred MB (this repository's CI
+  saves 540–660 MiB), so a few pull requests saving their own would soon
+  evict the default branch's, and every run would start cold.
+
+So if your workflow only runs on `pull_request`, nothing ever saves, and every
+run starts cold: add a `push` trigger for the default branch, as above.
+
+| `save-package-cache` | Saves on                | Use when                                                                                 |
+| -------------------- | ----------------------- | ---------------------------------------------------------------------------------------- |
+| `default-branch`     | the default branch only | almost always (the default)                                                              |
+| `always`             | every ref               | long-lived branches whose runs should warm each other, such as a `releases/v1` branch    |
+| `never`              | nothing                 | jobs that should only read the cache, such as a matrix's extra jobs on the same CPU arch |
+
+Whatever the setting, a job that added nothing to the cache saves nothing, and
+the job summary says what was restored, whether the cache was saved, and why.
+
+A matrix with several jobs on the same CPU arch (say `ubuntu-22.04` and
+`ubuntu-24.04`) saves one copy per job that added to the cache. They share
+a cache, so give all but one of them `save-package-cache: never`.
 
 ### How the package cache is kept
 
-GitHub caches cannot be overwritten, so each job that adds to the package
-cache saves it under a key of its own,
-`<package-cache-key>-<arch>-<run id>-<attempt>-<job>-<random>`, and the next
-job restores the newest cache under `<package-cache-key>-<arch>-`. The cache
-therefore keeps up with what your jobs download, and GitHub evicts the old
-copies (caches unused for 7 days, and the oldest beyond the repository's size
-limit).
+GitHub caches cannot be overwritten, so a run that saves uses a key of its
+own, `<package-cache-key>-<arch>-<run id>-<attempt>-<job>-<random>`, and the
+next job restores the newest cache it can see under
+`<package-cache-key>-<arch>-`. The cache therefore keeps up with what your
+jobs download, and GitHub evicts the old copies (caches unused for 7 days,
+and the oldest beyond the repository's size limit).
+
+The key holds the CPU arch and nothing else, on purpose: runners of every
+Ubuntu release share one cache, and so do changes to `snapcraft.yaml` or a
+lockfile. pkgproxy revalidates what can change upstream, so an older cache
+is still a warm one.
 
 A job that adds nothing, because everything it needed was already cached,
 saves nothing. The check compares the paths and sizes of the cache's files
@@ -59,6 +106,9 @@ cached is valid, only less complete.
 - Delete the "Prepare pkgproxy cache for saving" and `actions/cache/save`
   steps: the action saves the cache itself, and a save of your own would
   only fail with "cache already exists" or upload the cache twice.
+- v1 saved wherever your save step ran, pull requests included. v2 saves on
+  the default branch only, unless you say otherwise: see
+  [Which runs save the cache](#which-runs-save-the-cache).
 - The outputs `package-cache-hit`, `package-cache-key-success` and
   `package-cache-key-partial` are gone; see [Outputs](#outputs).
 - `package-cache-key` keeps its default, so the cache v1 saved warms the
@@ -239,14 +289,15 @@ run in either order, as long as both finish before `snapcraft pack` runs.
 
 ## Inputs
 
-| Input               | Default             | Description                                                               |
-| ------------------- | ------------------- | ------------------------------------------------------------------------- |
-| `version`           | `v0.11.0`           | pkgproxy version to build (Go module version string, pinned not `@main`). |
-| `go-version`        | `1.27.1`            | Go toolchain used to build pkgproxy on a binary-cache miss.               |
-| `addr`              | `:3142`             | Address pkgproxy listens on.                                              |
-| `binary-cache-key`  | `pkgproxy-bin`      | `actions/cache` key prefix for the built binary.                          |
-| `package-cache-key` | `pkgproxy-cache-v3` | `actions/cache` key prefix for the payload cache.                         |
-| `configure-host`    | `true`              | Whether to point the host's apt/snapd at the proxy.                       |
+| Input                | Default             | Description                                                               |
+| -------------------- | ------------------- | ------------------------------------------------------------------------- |
+| `version`            | `v0.11.0`           | pkgproxy version to build (Go module version string, pinned not `@main`). |
+| `go-version`         | `1.27.1`            | Go toolchain used to build pkgproxy on a binary-cache miss.               |
+| `addr`               | `:3142`             | Address pkgproxy listens on.                                              |
+| `binary-cache-key`   | `pkgproxy-bin`      | `actions/cache` key prefix for the built binary.                          |
+| `package-cache-key`  | `pkgproxy-cache-v3` | `actions/cache` key prefix for the payload cache.                         |
+| `configure-host`     | `true`              | Whether to point the host's apt/snapd at the proxy.                       |
+| `save-package-cache` | `default-branch`    | Which runs save the package cache: `default-branch`, `always` or `never`. |
 
 Bumping the pinned pkgproxy `version` is a one-file change here (this
 action's `version` default) — callers that don't pass `version:` explicitly
@@ -254,12 +305,12 @@ pick it up automatically on their next `@v2` resolution.
 
 ## Outputs
 
-| Output                       | Description                                                                 |
-| ---------------------------- | --------------------------------------------------------------------------- |
-| `addr`                       | The resolved listen address (echoes the `addr` input).                      |
-| `cache-dir`                  | The payload cache directory (`/var/cache/pkgproxy`).                        |
-| `package-cache-restored-key` | The key the package cache was restored from, or empty on a cold start.      |
-| `package-cache-key`          | The key the post step saves the package cache under, if the job adds to it. |
+| Output                       | Description                                                                                                   |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `addr`                       | The resolved listen address (echoes the `addr` input).                                                        |
+| `cache-dir`                  | The payload cache directory (`/var/cache/pkgproxy`).                                                          |
+| `package-cache-restored-key` | The key the package cache was restored from, or empty on a cold start.                                        |
+| `package-cache-key`          | The key the post step saves the package cache under, if the job adds to it; empty when this run may not save. |
 
 ## Versioning
 
