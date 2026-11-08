@@ -2,16 +2,15 @@
 # SPDX-FileCopyrightText: Zygmunt Krynicki
 #
 # Exercise the action, and the LXD/snapcraft setup the README documents, on
-# GitHub-hosted runners. Runs weekly too, so that drift in the runner images
-# (LXD preinstalled or not, the runner user's groups, LXD's version) shows up
-# here before it shows up in a caller's workflow.
+# GitHub-hosted runners. A full run builds a snap on three runners, so it
+# runs only for merges to main and for release tags (v1.2.3 and the floating
+# v1), where drift in the runner images (LXD preinstalled or not, the runner
+# user's groups, LXD's version) matters, plus by hand from the Actions tab.
 name: CI
 on:
   push:
     branches: [main]
-  pull_request:
-  schedule:
-    - cron: "17 5 * * 1"
+    tags: ["v*"]
   workflow_dispatch:
 
 permissions:

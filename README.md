@@ -133,8 +133,8 @@ below do. Pass the address through `env:` rather than splicing
 `${{ ... }}` into the single-quoted `sg` command.
 
 This repository's CI runs exactly these steps, followed by a real
-`snapcraft pack`, on all three runner images every week, so a change in
-the images shows up there first.
+`snapcraft pack`, on all three runner images for every merge and release,
+so a release is known to work on the images current at the time.
 
 ### lxd — containers as pkgproxy clients
 
