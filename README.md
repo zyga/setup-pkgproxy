@@ -36,6 +36,12 @@ The caller is responsible for pointing any other tools at the proxy (e.g.
   # to override.
 ```
 
+`id: pkgproxy` is the step's id, which GitHub Actions uses to name a step
+so that later steps can read its [outputs](#outputs): every example below
+passes `${{ steps.pkgproxy.outputs.addr }}` to `pkgproxyctl setup`. It is
+optional, and `pkgproxy` is only a convention; with another id, use that in
+the `steps.<id>.outputs` references.
+
 That is all: there is no save step to add. **Only runs on the default
 branch save the cache**, though, so make sure your workflow also runs on
 pushes to it:
