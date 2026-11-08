@@ -2,11 +2,14 @@
 # SPDX-FileCopyrightText: Zygmunt Krynicki
 #
 # Exercise the action, and the LXD/snapcraft setup the README documents, on
-# GitHub-hosted runners. A full run builds a snap on three runners, so it
-# runs only for merges to main and to release branches (releases/v1), for
-# release tags (v1.2.3 and the floating v1), where drift in the runner images (LXD preinstalled or not, the runner
-# user's groups, LXD's version) matters, for pull requests that change this
-# workflow or what it tests, and by hand from the Actions tab.
+# GitHub-hosted runners, then save the package cache as the README says
+# and check that a second job restores it, extended attributes included. A
+# full run builds a snap on three runners, so it runs only for merges to
+# main and to release branches (releases/v1), for release tags (v1.2.3 and
+# the floating v1), where drift in the runner images (LXD preinstalled or
+# not, the runner user's groups, LXD's version) matters, for pull requests
+# that change this workflow or what it tests, and by hand from the Actions
+# tab.
 name: CI
 on:
   push:
@@ -48,6 +51,11 @@ jobs:
       - name: Set up pkgproxy
         id: pkgproxy
         uses: ./
+        with:
+          # Unique to this run and runner image: v1's keys are stable per
+          # CPU arch, so two jobs on one arch, or another run, would share
+          # them, and the warm job must find this job's cache.
+          package-cache-key: ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.os }}
 
       # The steps below follow the README's LXD sections ("LXD access on
       # GitHub-hosted runners", lxd, lxd-remote, snapcraft) verbatim; keep
@@ -132,3 +140,70 @@ jobs:
       - name: Dump pkgproxy's log
         if: ${{ always() }}
         run: sudo journalctl -u pkgproxy.service --no-pager -n 300 || true
+
+      # pkgproxy 0.12 keeps each cached file's metadata in a user.* extended
+      # attribute, which the cache must keep: mark a file of the cache so
+      # that the warm job can check the attribute came back.
+      - name: Set an extended attribute in the cache for the warm job
+        env:
+          VALUE: ${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.os }}
+        run: |
+          echo probe | sudo tee /var/cache/pkgproxy/ci-xattr-probe >/dev/null
+          sudo python3 -c 'import os, sys; os.setxattr(sys.argv[1], "user.setup-pkgproxy.ci", sys.argv[2].encode())' \
+            /var/cache/pkgproxy/ci-xattr-probe "$VALUE"
+
+      # The README's save steps, verbatim.
+      - name: Prepare pkgproxy cache for saving
+        if: always()
+        shell: bash
+        run: |
+          sudo systemctl stop pkgproxy.service || true
+          sudo chown -R "$USER:$USER" ${{ steps.pkgproxy.outputs.cache-dir }}
+
+      - if: steps.pkgproxy.outputs.package-cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ steps.pkgproxy.outputs.cache-dir }}
+          key: ${{ steps.pkgproxy.outputs.package-cache-key-success }}
+
+  # A second job must restore the cache an lxd job saved, exactly, with the
+  # extended attribute it set.
+  warm:
+    name: Warm cache (${{ matrix.os }})
+    needs: lxd
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up pkgproxy
+        id: pkgproxy
+        uses: ./
+        with:
+          package-cache-key: ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.os }}
+
+      - name: Check that the lxd job's cache was restored
+        env:
+          HIT: ${{ steps.pkgproxy.outputs.package-cache-hit }}
+        run: |
+          echo "package-cache-hit: ${HIT:-}"
+          [ "$HIT" = true ] || { echo "::error::the cache the lxd job saved was not restored" >&2; exit 1; }
+          if [ -e /var/cache/pkgproxy-archive/cache.tar ]; then
+            echo "::error::the restored archive was not removed once unpacked" >&2
+            exit 1
+          fi
+          echo "ok: restored and unpacked"
+
+      - name: Check that the cache kept its extended attributes
+        env:
+          WANT: ${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.os }}
+        run: |
+          got=$(sudo python3 -c 'import os, sys; print(os.getxattr(sys.argv[1], "user.setup-pkgproxy.ci").decode())' \
+            /var/cache/pkgproxy/ci-xattr-probe) || got=
+          echo "user.setup-pkgproxy.ci: ${got:-missing}"
+          [ "$got" = "$WANT" ] || { echo "::error::the cache lost its extended attributes: expected $WANT" >&2; exit 1; }
+          echo "ok: the extended attribute set by the lxd job came back"
