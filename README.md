@@ -170,7 +170,8 @@ than deep inside `snapcraft pack`, check that both hooks are in place:
 - name: Verify the pkgproxy LXC hooks are in the snapcraft profile
   run: |
     RAW_LXC=$(lxc profile get default raw.lxc --project snapcraft)
-    if ! grep -q '^lxc.hook.pre-start = ' <<<"$RAW_LXC" || ! grep -q '^lxc.hook.post-stop = ' <<<"$RAW_LXC"; then
+    if ! printf '%s\n' "$RAW_LXC" | grep -q '^lxc.hook.pre-start = ' ||
+       ! printf '%s\n' "$RAW_LXC" | grep -q '^lxc.hook.post-stop = '; then
       echo "::error::pkgproxy LXC hooks missing from the snapcraft project's default profile" >&2
       exit 1
     fi
