@@ -135,6 +135,17 @@ jobs:
           expect "snaps from the build container" 'handler=snap .*outcome=(fetched|hit|joined|passthrough)' "remote_addr=$NET"
           exit "$fail"
 
+      # pkgproxy 0.12 keeps each cached file's metadata in a user.* extended
+      # attribute, which the cache must keep: mark a file of the cache so
+      # that the warm jobs can check the attribute came back.
+      - name: Set an extended attribute in the cache for the warm jobs
+        env:
+          VALUE: ${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.os }}
+        run: |
+          echo probe | sudo tee /var/cache/pkgproxy/ci-xattr-probe >/dev/null
+          sudo python3 -c 'import os, sys; os.setxattr(sys.argv[1], "user.setup-pkgproxy.ci", sys.argv[2].encode())' \
+            /var/cache/pkgproxy/ci-xattr-probe "$VALUE"
+
       - name: Dump pkgproxy's log
         if: ${{ always() }}
         run: sudo journalctl -u pkgproxy.service --no-pager -n 300 || true
@@ -166,12 +177,24 @@ jobs:
       - name: Check that the cache came from this run's lxd jobs
         env:
           RESTORED: ${{ steps.pkgproxy.outputs.package-cache-restored-key }}
-          WANT: pkgproxy-cache-v3-${{ runner.arch }}-${{ github.run_id }}-${{ github.run_attempt }}-lxd-
+          WANT: pkgproxy-cache-v4-${{ runner.arch }}-${{ github.run_id }}-${{ github.run_attempt }}-lxd-
         run: |
           echo "restored: ${RESTORED:-nothing}"
           case "$RESTORED" in
             "$WANT"*) echo "ok: restored the cache an lxd job saved" ;;
             *) echo "::error::expected a cache under $WANT, restored ${RESTORED:-nothing}" >&2; exit 1 ;;
+          esac
+
+      - name: Check that the cache kept its extended attributes
+        env:
+          WANT: ${{ github.run_id }}-${{ github.run_attempt }}-
+        run: |
+          got=$(sudo python3 -c 'import os, sys; print(os.getxattr(sys.argv[1], "user.setup-pkgproxy.ci").decode())' \
+            /var/cache/pkgproxy/ci-xattr-probe) || got=
+          echo "user.setup-pkgproxy.ci: ${got:-missing}"
+          case "$got" in
+            "$WANT"*) echo "ok: the extended attribute set by an lxd job came back" ;;
+            *) echo "::error::the cache lost its extended attributes: user.setup-pkgproxy.ci is ${got:-missing}, expected $WANT..." >&2; exit 1 ;;
           esac
 
       - name: Check whether this run may save
@@ -202,7 +225,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
           RUN: -${{ github.run_id }}-${{ github.run_attempt }}-
         run: |
-          gh cache list --ref "$GITHUB_REF" --key pkgproxy-cache-v3- --limit 100 --json key,sizeInBytes \
+          gh cache list --ref "$GITHUB_REF" --key pkgproxy-cache-v4- --limit 100 --json key,sizeInBytes \
             --jq ".[] | select(.key | contains(\"$RUN\")) | \"\(.key) \(.sizeInBytes)\"" | tee caches.txt
           lxd=$(grep -c -- "${RUN}lxd-" caches.txt || true)
           warm=$(grep -c -- "${RUN}warm-" caches.txt || true)
