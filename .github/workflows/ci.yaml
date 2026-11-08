@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Zygmunt Krynicki
 #
 # Exercise the action, and the LXD/snapcraft setup the README documents, on
-# GitHub-hosted runners. A full run builds a snap on three runners, so it
-# runs only for merges to main and to release branches (releases/v1), for
-# release tags (v1.2.3 and the floating v1), where drift in the runner images (LXD preinstalled or not, the runner
-# user's groups, LXD's version) matters, for pull requests that change this
-# workflow or what it tests, and by hand from the Actions tab.
+# GitHub-hosted runners, then check that the post step saved the package
+# cache and that a second job restores it. A full run builds a snap on three
+# runners, so it runs only for merges to main and to release branches, for
+# release tags, for pull requests that change this workflow or what it
+# tests, and by hand from the Actions tab. check.yaml has the cheap checks.
 name: CI
 on:
   push:
@@ -16,8 +16,10 @@ on:
     paths:
       - .github/workflows/ci.yaml
       - action.yaml
-      - build.sh
-      - start.sh
+      - dist/**
+      - src/**
+      - package.json
+      - package-lock.json
       - pkgproxy.service
       - tests/**
   workflow_dispatch:
@@ -132,3 +134,63 @@ jobs:
       - name: Dump pkgproxy's log
         if: ${{ always() }}
         run: sudo journalctl -u pkgproxy.service --no-pager -n 300 || true
+
+  # The lxd jobs' post steps saved the cache they filled. A second job on the
+  # same arch must restore one of those caches, and, adding nothing to it,
+  # must not save another.
+  warm:
+    name: Warm cache (${{ matrix.os }})
+    needs: lxd
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up pkgproxy
+        id: pkgproxy
+        uses: ./
+
+      - name: Check that the cache came from this run's lxd jobs
+        env:
+          RESTORED: ${{ steps.pkgproxy.outputs.package-cache-restored-key }}
+          WANT: pkgproxy-cache-v3-${{ runner.arch }}-${{ github.run_id }}-${{ github.run_attempt }}-lxd-
+        run: |
+          echo "restored: ${RESTORED:-nothing}"
+          case "$RESTORED" in
+            "$WANT"*) echo "ok: restored the cache an lxd job saved" ;;
+            *) echo "::error::expected a cache under $WANT, restored ${RESTORED:-nothing}" >&2; exit 1 ;;
+          esac
+          sudo find /var/cache/pkgproxy -maxdepth 1 | sort
+
+  saved-caches:
+    name: Caches saved by this run
+    needs: warm
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+    steps:
+      - name: Check which jobs saved a package cache
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN: -${{ github.run_id }}-${{ github.run_attempt }}-
+        run: |
+          gh cache list --ref "$GITHUB_REF" --key pkgproxy-cache-v3- --limit 100 --json key,sizeInBytes \
+            --jq ".[] | select(.key | contains(\"$RUN\")) | \"\(.key) \(.sizeInBytes)\"" | tee caches.txt
+          lxd=$(grep -c -- "${RUN}lxd-" caches.txt || true)
+          warm=$(grep -c -- "${RUN}warm-" caches.txt || true)
+          echo "lxd jobs saved $lxd caches, warm jobs saved $warm"
+          fail=0
+          if [ "$lxd" -ne 3 ]; then
+            echo "::error::each of the 3 lxd jobs should have saved its cache, $lxd did" >&2
+            fail=1
+          fi
+          if [ "$warm" -ne 0 ]; then
+            echo "::error::warm jobs added nothing to the cache, yet saved $warm; see their post step's job summary" >&2
+            fail=1
+          fi
+          exit "$fail"
