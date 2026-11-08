@@ -10,4 +10,8 @@ export const State = {
   restoredKey: "restored-key",
   /** A JSON file with the cache's manifest right after restore. */
   manifestPath: "manifest-path",
+  /** "true" when save-package-cache lets this run save the cache. */
+  saveAllowed: "save-allowed",
+  /** Why it may or may not, in words. */
+  saveReason: "save-reason",
 } as const;

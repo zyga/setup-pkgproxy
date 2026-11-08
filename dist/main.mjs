@@ -2,7 +2,7 @@ import { createRequire as __createRequire } from 'node:module'; const require = 
 
 // src/main.ts
 import { randomBytes } from "node:crypto";
-import { access, mkdir, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join as join3 } from "node:path";
 import { cache, core as core3, exec as exec2 } from "#vendor";
 
@@ -166,6 +166,35 @@ async function snapshot(dir) {
   return out;
 }
 
+// src/policy.ts
+var POLICIES = ["default-branch", "always", "never"];
+function parsePolicy(value) {
+  const v = value.trim() || "default-branch";
+  if (POLICIES.includes(v)) {
+    return v;
+  }
+  throw new Error(`save-package-cache must be one of ${POLICIES.join(", ")}, not ${JSON.stringify(value)}`);
+}
+function saveDecision(policy, ref, defaultBranch2) {
+  switch (policy) {
+    case "never":
+      return { allowed: false, reason: "save-package-cache is never" };
+    case "always":
+      return { allowed: true, reason: "save-package-cache is always" };
+    case "default-branch":
+      if (!defaultBranch2) {
+        return { allowed: false, reason: "the repository's default branch is unknown" };
+      }
+      if (ref === `refs/heads/${defaultBranch2}`) {
+        return { allowed: true, reason: `${ref} is the default branch` };
+      }
+      return {
+        allowed: false,
+        reason: `${ref} is not the default branch (${defaultBranch2}); runs here restore the default branch's cache`
+      };
+  }
+}
+
 // src/state.ts
 var State = {
   /** The key the post step saves the package cache under. */
@@ -173,7 +202,11 @@ var State = {
   /** The key the package cache was restored from, or "". */
   restoredKey: "restored-key",
   /** A JSON file with the cache's manifest right after restore. */
-  manifestPath: "manifest-path"
+  manifestPath: "manifest-path",
+  /** "true" when save-package-cache lets this run save the cache. */
+  saveAllowed: "save-allowed",
+  /** Why it may or may not, in words. */
+  saveReason: "save-reason"
 };
 
 // src/main.ts
@@ -220,7 +253,21 @@ async function pkgproxyBinary(version, goVersion, prefix, arch) {
   }
   return binary;
 }
+async function defaultBranch() {
+  const path = process.env.GITHUB_EVENT_PATH;
+  if (!path) {
+    return void 0;
+  }
+  try {
+    const event = JSON.parse(await readFile(path, "utf8"));
+    const branch = event.repository?.default_branch;
+    return typeof branch === "string" && branch ? branch : void 0;
+  } catch {
+    return void 0;
+  }
+}
 async function run() {
+  const policy = parsePolicy(core3.getInput("save-package-cache"));
   const version = core3.getInput("version", { required: true });
   const goVersion = core3.getInput("go-version", { required: true });
   const addr = core3.getInput("addr", { required: true });
@@ -247,10 +294,14 @@ async function run() {
     const manifestPath = join3(env("RUNNER_TEMP"), `setup-pkgproxy-manifest-${keys.save}.json`);
     await writeFile(manifestPath, JSON.stringify(manifest));
     core3.info(`${Object.keys(manifest).length} files in the package cache`);
+    const decision = saveDecision(policy, env("GITHUB_REF"), await defaultBranch());
+    core3.info(`The post step ${decision.allowed ? "may save" : "will not save"} the package cache: ${decision.reason}.`);
     core3.saveState(State.manifestPath, manifestPath);
     core3.saveState(State.restoredKey, key);
+    core3.saveState(State.saveAllowed, decision.allowed ? "true" : "false");
+    core3.saveState(State.saveReason, decision.reason);
     core3.saveState(State.saveKey, keys.save);
-    return key;
+    return { key, allowed: decision.allowed };
   });
   await core3.group("Start pkgproxy", () => start(addr));
   if (configure) {
@@ -258,8 +309,8 @@ async function run() {
   }
   core3.setOutput("addr", addr);
   core3.setOutput("cache-dir", CACHE_DIR);
-  core3.setOutput("package-cache-restored-key", restored);
-  core3.setOutput("package-cache-key", keys.save);
+  core3.setOutput("package-cache-restored-key", restored.key);
+  core3.setOutput("package-cache-key", restored.allowed ? keys.save : "");
 }
 run().catch((err) => {
   core3.setFailed(err instanceof Error ? err.message : String(err));

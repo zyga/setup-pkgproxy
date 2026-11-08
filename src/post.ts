@@ -2,8 +2,10 @@
 // SPDX-FileCopyrightText: Zygmunt Krynicki
 
 // The action's post step, run at the end of the job whether it passed or
-// failed: stop pkgproxy and save the package cache if the job added to it.
-// A failed job's cache is a valid, smaller cache, so it is saved too.
+// failed: stop pkgproxy and save the package cache, if save-package-cache
+// lets this run save (by default, only on the default branch: policy.ts)
+// and the job added to the cache. A failed job's cache is a valid, smaller
+// cache, so it is saved too.
 
 import { readFile } from "node:fs/promises";
 import { cache, core } from "#vendor";
@@ -36,7 +38,9 @@ async function run(): Promise<void> {
   );
 
   let outcome: string;
-  if (!changed(d)) {
+  if (core.getState(State.saveAllowed) !== "true") {
+    outcome = `not saved: ${core.getState(State.saveReason)}`;
+  } else if (!changed(d)) {
     outcome = "not saved: unchanged since restore";
   } else {
     try {

@@ -38,10 +38,24 @@ inputs:
       actions/cache key prefix for the pkgproxy payload cache
       (/var/cache/pkgproxy). The main step restores the newest cache under
       <prefix>-<arch>-, and the post step, at the end of the job, saves the
-      cache under a key unique to the job, when the job added to it. The
-      default matches v1's, so the cache v1 saved warms the first v2 run.
+      cache under a key unique to the job, when save-package-cache allows it
+      and the job added to the cache. The default matches v1's, so the cache
+      v1 saved warms the first v2 run.
     required: false
     default: pkgproxy-cache-v3
+  save-package-cache:
+    description: >-
+      Which runs save the package cache at the end of the job: default-branch
+      (the default), always, or never. A run can restore only the caches of
+      its own ref, its pull request's base branch and the default branch, so
+      a cache saved by a pull request or feature branch helps only that ref's
+      later runs, while taking as much of the repository's cache storage as
+      the default branch's, which every run restores. With default-branch,
+      the default branch keeps the one shared cache and other runs only read
+      it. Whatever the setting, a job that added nothing to the cache saves
+      nothing.
+    required: false
+    default: default-branch
   configure-host:
     description: >-
       Whether to point the host's apt and snapd at the proxy (pkgproxyctl setup
@@ -59,7 +73,9 @@ outputs:
   package-cache-restored-key:
     description: The key the package cache was restored from, or empty on a cold start.
   package-cache-key:
-    description: The key the post step saves the package cache under, if the job adds to it.
+    description: >-
+      The key the post step saves the package cache under, if the job adds to
+      it; empty when save-package-cache does not let this run save.
 branding:
   icon: package
   color: purple
