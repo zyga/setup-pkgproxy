@@ -4,13 +4,13 @@
 # Exercise the action, and the LXD/snapcraft setup the README documents, on
 # GitHub-hosted runners, then check that the post step saved the package
 # cache and that a second job restores it. A full run builds a snap on three
-# runners, so it runs only for merges to main and to release branches, for
+# runners, so it runs only for merges to release branches, for
 # release tags, for pull requests that change this workflow or what it
 # tests, and by hand from the Actions tab. check.yaml has the cheap checks.
 name: CI
 on:
   push:
-    branches: [main, "releases/**"]
+    branches: ["releases/**"]
     # Version tags only: a floating v1/v2 tag points at a commit its
     # version tag already ran for.
     tags: ["v*.*.*"]
