@@ -134,7 +134,7 @@ jobs:
               fail=1
             fi
           }
-          expect "LXD base image via pkgproxy" 'handler=lxd .*outcome=(fetched|hit|joined|revalidated)' 'craft-com.ubuntu.cloud-buildd'
+          expect "LXD base image via pkgproxy" 'handler=lxd(-api)? .*outcome=(fetched|hit|joined|revalidated)' 'craft-com.ubuntu.cloud-buildd'
           expect "staged apt package from the build container" 'url=http://[^ ]*/hello_[^ ]*\.deb .*handler=apt .*outcome=(fetched|hit|joined)' "remote_addr=$NET"
           expect "snaps from the build container" 'handler=snap .*outcome=(fetched|hit|joined|passthrough)' "remote_addr=$NET"
           exit "$fail"
