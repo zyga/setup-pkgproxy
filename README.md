@@ -102,21 +102,27 @@ lockfile. pkgproxy revalidates what can change upstream, so an older cache
 is still a warm one.
 
 A job that adds nothing, because everything it needed was already cached,
-saves nothing. The check compares the paths and sizes of the cache's files
-right after restore and at the end of the job, ignoring pkgproxy's
-`stats.json`. A change to a file's extended attributes alone, as when
-pkgproxy only revalidates a file, is not noticed: it is not worth uploading
-the whole cache for. A failed or cancelled job's cache is saved too: what
+saves nothing. The check compares the paths and sizes of the cache's
+**immutable** files right after restore and at the end of the job: the
+objects pkgproxy never revalidates (apt's packages, snap blobs, LXD images,
+Go modules), which it marks immutable in each object's metadata. The
+mutable indexes are revalidated and fetched again anyway, and watching
+them would make every run look changed. They are read from
+`pkgproxyctl cache list` where pkgproxy has it
+(gitlab.com/zygoon/pkgproxy!250), and from the objects' `.meta.json`
+sidecars where it does not; when neither works the whole cache is watched
+and saved, as before. A failed or cancelled job's cache is saved too: what
 pkgproxy cached is valid, only less complete.
 
-What is saved is an archive of `/var/cache/pkgproxy`, not the directory
-itself. pkgproxy 0.12 keeps what it knows of each cached file in an
-extended attribute of the file (`user.pkgproxy.meta`), and the `tar` that
-`actions/cache` runs drops extended attributes; a file that lost its
-attribute is downloaded again, so the cache would never help. When pkgproxy
-stops, its systemd unit writes `/var/cache/pkgproxy-archive/cache.tar` with
-`tar --xattrs`, which `actions/cache` then saves, and the main step unpacks
-a restored archive the same way.
+What is saved is an archive of the immutable files of
+`/var/cache/pkgproxy`, not the directory itself. pkgproxy 0.12 keeps what
+it knows of each cached file in an extended attribute of the file
+(`user.pkgproxy.meta`), and the `tar` that `actions/cache` runs drops
+extended attributes; a file that lost its attribute is downloaded again,
+so the cache would never help. When pkgproxy stops, its systemd unit
+writes `/var/cache/pkgproxy-archive/cache.tar` with `tar --xattrs` from
+the post step's list of immutable files, which `actions/cache` then
+saves, and the main step unpacks a restored archive the same way.
 
 ### Upgrading from v1
 

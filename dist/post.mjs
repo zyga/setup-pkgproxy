@@ -1,7 +1,7 @@
 import { createRequire as __createRequire } from 'node:module'; const require = __createRequire(import.meta.url);
 
 // src/post.ts
-import { readFile } from "node:fs/promises";
+import { readFile as readFile2, rm as rm2, writeFile } from "node:fs/promises";
 import { cache, core } from "#vendor";
 
 // src/daemon.ts
@@ -47,15 +47,98 @@ async function stopAndReleaseCache() {
   }
 }
 
+// src/immutable.ts
+import { lstat, readdir, readFile } from "node:fs/promises";
+import { join, relative, sep } from "node:path";
+import { exec as exec2 } from "#vendor";
+function parseCacheList(stdout) {
+  const paths = /* @__PURE__ */ new Set();
+  for (const line of stdout.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      continue;
+    }
+    let entry;
+    try {
+      entry = JSON.parse(trimmed);
+    } catch {
+      continue;
+    }
+    if (typeof entry.path === "string" && entry.immutable === true) {
+      paths.add(entry.path);
+      paths.add(`${entry.path}.meta.json`);
+    }
+  }
+  return paths;
+}
+function sidecarPath(rel) {
+  const parts = rel.split("/");
+  if (parts.length < 3 || parts[1] !== "objects" || rel.endsWith(".meta.json")) {
+    return null;
+  }
+  return `${rel}.meta.json`;
+}
+async function sidecarImmutable(path) {
+  let meta;
+  try {
+    meta = JSON.parse(await readFile(path, "utf8"));
+  } catch {
+    return null;
+  }
+  return meta.Immutable === true;
+}
+async function sidecarImmutablePaths(cacheDir) {
+  const paths = /* @__PURE__ */ new Set();
+  let entries;
+  try {
+    entries = await readdir(cacheDir, { recursive: true });
+  } catch {
+    return paths;
+  }
+  for (const entry of entries) {
+    const rel = relative(cacheDir, join(cacheDir, entry)).split(sep).join("/");
+    const sidecar = sidecarPath(rel);
+    if (sidecar === null) {
+      continue;
+    }
+    const st = await lstat(join(cacheDir, entry)).catch(() => null);
+    if (!st?.isFile()) {
+      continue;
+    }
+    const immutable = await sidecarImmutable(join(cacheDir, sidecar));
+    if (immutable !== false) {
+      paths.add(rel);
+      paths.add(sidecar);
+    }
+  }
+  return paths;
+}
+async function immutablePaths(cacheDir) {
+  const out = await exec2.getExecOutput(
+    "pkgproxyctl",
+    ["cache", "list", "-output-format=json", "-cache-dir", cacheDir],
+    { ignoreReturnCode: true, silent: true }
+  );
+  if (out.exitCode === 0) {
+    return { paths: parseCacheList(out.stdout), how: "pkgproxyctl cache list" };
+  }
+  try {
+    const paths = await sidecarImmutablePaths(cacheDir);
+    return { paths, how: "the objects' .meta.json sidecars" };
+  } catch {
+    return null;
+  }
+}
+
 // src/manifest.ts
-import { readdir, lstat } from "node:fs/promises";
-import { join, relative } from "node:path";
+import { readdir as readdir2, lstat as lstat2 } from "node:fs/promises";
+import { join as join2, relative as relative2, sep as sep2 } from "node:path";
 var IGNORED = /* @__PURE__ */ new Set(["stats.json"]);
-async function snapshot(dir) {
+async function snapshot(dir, only) {
   const out = {};
   let entries;
   try {
-    entries = await readdir(dir, { recursive: true });
+    entries = await readdir2(dir, { recursive: true });
   } catch (err) {
     if (err.code === "ENOENT") {
       return out;
@@ -63,13 +146,13 @@ async function snapshot(dir) {
     throw err;
   }
   for (const entry of entries) {
-    const path = join(dir, entry);
-    const st = await lstat(path);
+    const path = join2(dir, entry);
+    const st = await lstat2(path);
     if (!st.isFile()) {
       continue;
     }
-    const rel = relative(dir, path);
-    if (!IGNORED.has(rel)) {
+    const rel = relative2(dir, path);
+    if (!IGNORED.has(rel) && (only === void 0 || only.has(rel.split(sep2).join("/")))) {
       out[rel] = st.size;
     }
   }
@@ -120,6 +203,7 @@ var State = {
 function mib(bytes) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
 }
+var INCLUDE_LIST = `${ARCHIVE_DIR}/files.txt`;
 async function run() {
   const saveKey = core.getState(State.saveKey);
   if (!saveKey) {
@@ -128,9 +212,18 @@ async function run() {
   }
   const restoredKey = core.getState(State.restoredKey);
   const statsText = await stats();
+  const immutable = await immutablePaths(CACHE_DIR);
+  if (immutable) {
+    const list = [...immutable.paths].sort().join("\n") + "\n";
+    await writeFile(INCLUDE_LIST, list);
+    core.info(`Archiving the cache's immutable files only (${immutable.paths.size} paths), from ${immutable.how}`);
+  } else {
+    await rm2(INCLUDE_LIST, { force: true });
+    core.warning("Cannot tell the cache's immutable files apart, archiving the whole cache");
+  }
   const archived = await stopAndReleaseCache();
-  const before = JSON.parse(await readFile(core.getState(State.manifestPath), "utf8"));
-  const d = diff(before, await snapshot(CACHE_DIR));
+  const before = JSON.parse(await readFile2(core.getState(State.manifestPath), "utf8"));
+  const d = diff(before, await snapshot(CACHE_DIR, immutable?.paths));
   core.info(
     `Package cache: ${d.files} files, ${mib(d.bytes)}; ${d.added} added, ${d.removed} removed, ${d.resized} changed size since restore.`
   );
@@ -158,7 +251,7 @@ async function run() {
       { data: "", header: true }
     ],
     ["Restored from", restoredKey || "nothing (cold start)"],
-    ["Files", `${d.files} (${mib(d.bytes)})`],
+    [immutable ? "Immutable files" : "Files", `${d.files} (${mib(d.bytes)})`],
     ["Since restore", `${d.added} added, ${d.removed} removed, ${d.resized} changed size`],
     ["Saved", outcome]
   ]);

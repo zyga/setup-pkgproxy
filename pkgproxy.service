@@ -32,7 +32,12 @@ ExecStart=/usr/local/bin/pkgproxy \
 # cache directory. Written under a temporary name and renamed, so a stop cut
 # short leaves no half-written archive to save. Not in CacheDirectory=, whose
 # list would turn $CACHE_DIRECTORY into a colon-separated one.
-ExecStopPost=/bin/sh -c 'mkdir -p /var/cache/pkgproxy-archive && tar --xattrs --xattrs-include="user.*" -cf /var/cache/pkgproxy-archive/cache.tar.tmp -C "$CACHE_DIRECTORY" . && mv /var/cache/pkgproxy-archive/cache.tar.tmp /var/cache/pkgproxy-archive/cache.tar'
+# files.txt, when the post step writes it, names the files the archive keeps
+# — the cache's immutable objects only (src/post.ts): the mutable indexes
+# are revalidated and fetched again anyway, and archiving them would make
+# every run look changed. --ignore-failed-read keeps a file the daemon
+# replaced between the list and this tar from failing the archive.
+ExecStopPost=/bin/sh -c 'mkdir -p /var/cache/pkgproxy-archive && if [ -s /var/cache/pkgproxy-archive/files.txt ]; then tar --xattrs --xattrs-include="user.*" --ignore-failed-read -C "$CACHE_DIRECTORY" -cf /var/cache/pkgproxy-archive/cache.tar.tmp --files-from /var/cache/pkgproxy-archive/files.txt; else tar --xattrs --xattrs-include="user.*" -cf /var/cache/pkgproxy-archive/cache.tar.tmp -C "$CACHE_DIRECTORY" .; fi && mv /var/cache/pkgproxy-archive/cache.tar.tmp /var/cache/pkgproxy-archive/cache.tar'
 # The archive of a large cache (a snap build's is several hundred MB) can
 # take longer than the default 90 seconds.
 TimeoutStopSec=15min

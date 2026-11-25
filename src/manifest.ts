@@ -5,7 +5,7 @@
 // only then, since a save uploads the whole cache.
 
 import { readdir, lstat } from "node:fs/promises";
-import { join, relative } from "node:path";
+import { join, relative, sep } from "node:path";
 
 /** Relative path to size in bytes, for every regular file in the cache. */
 export type Manifest = Record<string, number>;
@@ -17,7 +17,7 @@ export type Manifest = Record<string, number>;
 export const IGNORED: ReadonlySet<string> = new Set(["stats.json"]);
 
 /** Lists the cache's files with their sizes. A missing dir is empty. */
-export async function snapshot(dir: string): Promise<Manifest> {
+export async function snapshot(dir: string, only?: ReadonlySet<string>): Promise<Manifest> {
   const out: Manifest = {};
   let entries: string[];
   try {
@@ -35,7 +35,8 @@ export async function snapshot(dir: string): Promise<Manifest> {
       continue;
     }
     const rel = relative(dir, path);
-    if (!IGNORED.has(rel)) {
+    // only, when given, holds paths with slashes (see immutable.ts).
+    if (!IGNORED.has(rel) && (only === undefined || only.has(rel.split(sep).join("/")))) {
       out[rel] = st.size;
     }
   }

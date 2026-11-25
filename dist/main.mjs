@@ -2,9 +2,9 @@ import { createRequire as __createRequire } from 'node:module'; const require = 
 
 // src/main.ts
 import { randomBytes } from "node:crypto";
-import { access, mkdir, readFile, writeFile } from "node:fs/promises";
-import { join as join3 } from "node:path";
-import { cache, core as core2, exec as exec2 } from "#vendor";
+import { access, mkdir, readFile as readFile2, writeFile } from "node:fs/promises";
+import { join as join4 } from "node:path";
+import { cache, core as core2, exec as exec3 } from "#vendor";
 
 // src/daemon.ts
 import { rm, stat } from "node:fs/promises";
@@ -46,7 +46,12 @@ ExecStart=/usr/local/bin/pkgproxy \\
 # cache directory. Written under a temporary name and renamed, so a stop cut
 # short leaves no half-written archive to save. Not in CacheDirectory=, whose
 # list would turn $CACHE_DIRECTORY into a colon-separated one.
-ExecStopPost=/bin/sh -c 'mkdir -p /var/cache/pkgproxy-archive && tar --xattrs --xattrs-include="user.*" -cf /var/cache/pkgproxy-archive/cache.tar.tmp -C "$CACHE_DIRECTORY" . && mv /var/cache/pkgproxy-archive/cache.tar.tmp /var/cache/pkgproxy-archive/cache.tar'
+# files.txt, when the post step writes it, names the files the archive keeps
+# \u2014 the cache's immutable objects only (src/post.ts): the mutable indexes
+# are revalidated and fetched again anyway, and archiving them would make
+# every run look changed. --ignore-failed-read keeps a file the daemon
+# replaced between the list and this tar from failing the archive.
+ExecStopPost=/bin/sh -c 'mkdir -p /var/cache/pkgproxy-archive && if [ -s /var/cache/pkgproxy-archive/files.txt ]; then tar --xattrs --xattrs-include="user.*" --ignore-failed-read -C "$CACHE_DIRECTORY" -cf /var/cache/pkgproxy-archive/cache.tar.tmp --files-from /var/cache/pkgproxy-archive/files.txt; else tar --xattrs --xattrs-include="user.*" -cf /var/cache/pkgproxy-archive/cache.tar.tmp -C "$CACHE_DIRECTORY" .; fi && mv /var/cache/pkgproxy-archive/cache.tar.tmp /var/cache/pkgproxy-archive/cache.tar'
 # The archive of a large cache (a snap build's is several hundred MB) can
 # take longer than the default 90 seconds.
 TimeoutStopSec=15min
@@ -182,6 +187,89 @@ async function ensureGo(version) {
   return join(dir, "bin");
 }
 
+// src/immutable.ts
+import { lstat, readdir, readFile } from "node:fs/promises";
+import { join as join2, relative, sep } from "node:path";
+import { exec as exec2 } from "#vendor";
+function parseCacheList(stdout) {
+  const paths = /* @__PURE__ */ new Set();
+  for (const line of stdout.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      continue;
+    }
+    let entry;
+    try {
+      entry = JSON.parse(trimmed);
+    } catch {
+      continue;
+    }
+    if (typeof entry.path === "string" && entry.immutable === true) {
+      paths.add(entry.path);
+      paths.add(`${entry.path}.meta.json`);
+    }
+  }
+  return paths;
+}
+function sidecarPath(rel) {
+  const parts = rel.split("/");
+  if (parts.length < 3 || parts[1] !== "objects" || rel.endsWith(".meta.json")) {
+    return null;
+  }
+  return `${rel}.meta.json`;
+}
+async function sidecarImmutable(path) {
+  let meta;
+  try {
+    meta = JSON.parse(await readFile(path, "utf8"));
+  } catch {
+    return null;
+  }
+  return meta.Immutable === true;
+}
+async function sidecarImmutablePaths(cacheDir) {
+  const paths = /* @__PURE__ */ new Set();
+  let entries;
+  try {
+    entries = await readdir(cacheDir, { recursive: true });
+  } catch {
+    return paths;
+  }
+  for (const entry of entries) {
+    const rel = relative(cacheDir, join2(cacheDir, entry)).split(sep).join("/");
+    const sidecar = sidecarPath(rel);
+    if (sidecar === null) {
+      continue;
+    }
+    const st = await lstat(join2(cacheDir, entry)).catch(() => null);
+    if (!st?.isFile()) {
+      continue;
+    }
+    const immutable = await sidecarImmutable(join2(cacheDir, sidecar));
+    if (immutable !== false) {
+      paths.add(rel);
+      paths.add(sidecar);
+    }
+  }
+  return paths;
+}
+async function immutablePaths(cacheDir) {
+  const out = await exec2.getExecOutput(
+    "pkgproxyctl",
+    ["cache", "list", "-output-format=json", "-cache-dir", cacheDir],
+    { ignoreReturnCode: true, silent: true }
+  );
+  if (out.exitCode === 0) {
+    return { paths: parseCacheList(out.stdout), how: "pkgproxyctl cache list" };
+  }
+  try {
+    const paths = await sidecarImmutablePaths(cacheDir);
+    return { paths, how: "the objects' .meta.json sidecars" };
+  } catch {
+    return null;
+  }
+}
+
 // src/keys.ts
 function binaryCacheKey(prefix, version, goVersion, arch) {
   return `${prefix}-${version}-go${goVersion}-${arch}`;
@@ -198,14 +286,14 @@ function sanitize(s) {
 }
 
 // src/manifest.ts
-import { readdir, lstat } from "node:fs/promises";
-import { join as join2, relative } from "node:path";
+import { readdir as readdir2, lstat as lstat2 } from "node:fs/promises";
+import { join as join3, relative as relative2, sep as sep2 } from "node:path";
 var IGNORED = /* @__PURE__ */ new Set(["stats.json"]);
-async function snapshot(dir) {
+async function snapshot(dir, only) {
   const out = {};
   let entries;
   try {
-    entries = await readdir(dir, { recursive: true });
+    entries = await readdir2(dir, { recursive: true });
   } catch (err) {
     if (err.code === "ENOENT") {
       return out;
@@ -213,13 +301,13 @@ async function snapshot(dir) {
     throw err;
   }
   for (const entry of entries) {
-    const path = join2(dir, entry);
-    const st = await lstat(path);
+    const path = join3(dir, entry);
+    const st = await lstat2(path);
     if (!st.isFile()) {
       continue;
     }
-    const rel = relative(dir, path);
-    if (!IGNORED.has(rel)) {
+    const rel = relative2(dir, path);
+    if (!IGNORED.has(rel) && (only === void 0 || only.has(rel.split(sep2).join("/")))) {
       out[rel] = st.size;
     }
   }
@@ -286,8 +374,8 @@ async function exists(path) {
   }
 }
 async function pkgproxyBinary(version, goVersion, prefix, arch) {
-  const binDir = join3(env("RUNNER_TEMP"), "setup-pkgproxy", "bin");
-  const binary = join3(binDir, "pkgproxy");
+  const binDir = join4(env("RUNNER_TEMP"), "setup-pkgproxy", "bin");
+  const binary = join4(binDir, "pkgproxy");
   const key = binaryCacheKey(prefix, version, goVersion, arch);
   const hit = await cache.restoreCache([binDir], key);
   if (hit && await exists(binary)) {
@@ -296,7 +384,7 @@ async function pkgproxyBinary(version, goVersion, prefix, arch) {
   }
   const goBin = await ensureGo(goVersion);
   await mkdir(binDir, { recursive: true });
-  await exec2.exec(join3(goBin, "go"), ["install", `gitlab.com/zygoon/pkgproxy/cmd/pkgproxy@${version}`], {
+  await exec3.exec(join4(goBin, "go"), ["install", `gitlab.com/zygoon/pkgproxy/cmd/pkgproxy@${version}`], {
     env: {
       ...process.env,
       GOBIN: binDir,
@@ -319,7 +407,7 @@ async function defaultBranch() {
     return void 0;
   }
   try {
-    const event = JSON.parse(await readFile(path, "utf8"));
+    const event = JSON.parse(await readFile2(path, "utf8"));
     const branch = event.repository?.default_branch;
     return typeof branch === "string" && branch ? branch : void 0;
   } catch {
@@ -354,8 +442,14 @@ async function run() {
     } else {
       core2.info(`No package cache under ${keys.restorePrefix} yet`);
     }
-    const manifest = await snapshot(CACHE_DIR);
-    const manifestPath = join3(env("RUNNER_TEMP"), `setup-pkgproxy-manifest-${keys.save}.json`);
+    const immutable = await immutablePaths(CACHE_DIR);
+    if (immutable) {
+      core2.info(`Watching the cache's immutable files only, from ${immutable.how}`);
+    } else {
+      core2.info("Cannot tell the cache's immutable files apart, watching them all");
+    }
+    const manifest = await snapshot(CACHE_DIR, immutable?.paths);
+    const manifestPath = join4(env("RUNNER_TEMP"), `setup-pkgproxy-manifest-${keys.save}.json`);
     await writeFile(manifestPath, JSON.stringify(manifest));
     core2.info(`${Object.keys(manifest).length} files in the package cache`);
     const decision = saveDecision(policy, env("GITHUB_REF"), await defaultBranch());
