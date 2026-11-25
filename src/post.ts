@@ -7,16 +7,25 @@
 // and the job added to the cache. A failed job's cache is a valid, smaller
 // cache, so it is saved too.
 
-import { readFile } from "node:fs/promises";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import { cache, core } from "#vendor";
 
 import { ARCHIVE_DIR, CACHE_DIR, stats, stopAndReleaseCache } from "./daemon.ts";
+import { immutablePaths } from "./immutable.ts";
 import { changed, diff, snapshot, type Manifest } from "./manifest.ts";
 import { State } from "./state.ts";
 
 function mib(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
 }
+
+/**
+ * The file the unit's ExecStopPost tars the cache from, when it is there:
+ * the paths the archive keeps, relative to the cache directory. Written
+ * before pkgproxy stops, removed when the immutable files cannot be told
+ * apart, so a stale list never filters a full archive.
+ */
+const INCLUDE_LIST = `${ARCHIVE_DIR}/files.txt`;
 
 async function run(): Promise<void> {
   const saveKey = core.getState(State.saveKey);
@@ -28,10 +37,24 @@ async function run(): Promise<void> {
 
   // Before stopping pkgproxy, which takes its stats socket down.
   const statsText = await stats();
+
+  // What the archive keeps: the immutable objects only, when they can be
+  // told apart — the mutable lists and indexes are revalidated and fetched
+  // again anyway, and archiving them would make every run look changed.
+  const immutable = await immutablePaths(CACHE_DIR);
+  if (immutable) {
+    const list = [...immutable.paths].sort().join("\n") + "\n";
+    await writeFile(INCLUDE_LIST, list);
+    core.info(`Archiving the cache's immutable files only (${immutable.paths.size} paths), from ${immutable.how}`);
+  } else {
+    await rm(INCLUDE_LIST, { force: true });
+    core.warning("Cannot tell the cache's immutable files apart, archiving the whole cache");
+  }
+
   const archived = await stopAndReleaseCache();
 
   const before = JSON.parse(await readFile(core.getState(State.manifestPath), "utf8")) as Manifest;
-  const d = diff(before, await snapshot(CACHE_DIR));
+  const d = diff(before, await snapshot(CACHE_DIR, immutable?.paths));
   core.info(
     `Package cache: ${d.files} files, ${mib(d.bytes)}; ` +
       `${d.added} added, ${d.removed} removed, ${d.resized} changed size since restore.`,
@@ -62,7 +85,7 @@ async function run(): Promise<void> {
       { data: "", header: true },
     ],
     ["Restored from", restoredKey || "nothing (cold start)"],
-    ["Files", `${d.files} (${mib(d.bytes)})`],
+    [immutable ? "Immutable files" : "Files", `${d.files} (${mib(d.bytes)})`],
     ["Since restore", `${d.added} added, ${d.removed} removed, ${d.resized} changed size`],
     ["Saved", outcome],
   ]);

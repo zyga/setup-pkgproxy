@@ -12,6 +12,7 @@ import { cache, core, exec } from "#vendor";
 
 import { ARCHIVE_DIR, CACHE_DIR, configureHost, extractArchive, releaseDirs, start, sudo } from "./daemon.ts";
 import { ensureGo } from "./go.ts";
+import { immutablePaths } from "./immutable.ts";
 import { binaryCacheKey, packageCacheKeys } from "./keys.ts";
 import { snapshot } from "./manifest.ts";
 import { parsePolicy, saveDecision } from "./policy.ts";
@@ -119,7 +120,16 @@ async function run(): Promise<void> {
       core.info(`No package cache under ${keys.restorePrefix} yet`);
     }
 
-    const manifest = await snapshot(CACHE_DIR);
+    // The manifest watches the cache's immutable files only: they are the
+    // ones the archive keeps (see post.ts), and revalidated indexes would
+    // otherwise make every run look like a change.
+    const immutable = await immutablePaths(CACHE_DIR);
+    if (immutable) {
+      core.info(`Watching the cache's immutable files only, from ${immutable.how}`);
+    } else {
+      core.info("Cannot tell the cache's immutable files apart, watching them all");
+    }
+    const manifest = await snapshot(CACHE_DIR, immutable?.paths);
     const manifestPath = join(env("RUNNER_TEMP"), `setup-pkgproxy-manifest-${keys.save}.json`);
     await writeFile(manifestPath, JSON.stringify(manifest));
     core.info(`${Object.keys(manifest).length} files in the package cache`);

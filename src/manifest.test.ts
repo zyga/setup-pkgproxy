@@ -34,6 +34,17 @@ test("snapshot of a missing dir is empty", async () => {
   assert.deepEqual(await snapshot(join(tmpdir(), "does-not-exist-setup-pkgproxy")), {});
 });
 
+test("snapshot with only lists only the set's files", () =>
+  withDir(async (dir) => {
+    await mkdir(join(dir, "apt", "pool"), { recursive: true });
+    await writeFile(join(dir, "apt", "pool", "a.deb"), "12345");
+    await writeFile(join(dir, "apt", "index.json"), "123");
+    const only = new Set(["apt/pool/a.deb", "apt/pool/gone.deb"]);
+    assert.deepEqual(await snapshot(dir, only), {
+      [join("apt", "pool", "a.deb")]: 5,
+    });
+  }));
+
 test("diff counts added, removed and resized files", () => {
   const d = diff({ a: 1, b: 2, c: 3 }, { a: 1, b: 20, d: 4 });
   assert.deepEqual(d, { added: 1, removed: 1, resized: 1, bytes: 25, files: 3 });
